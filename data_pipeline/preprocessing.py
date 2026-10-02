@@ -35,6 +35,11 @@ class PreprocessingPipeline:
             stats = np.load(STATS_FILE, allow_pickle=True).item()
             self.train_mean = stats["mean"]
             self.train_std = stats["std"]
+            
+            # Prevent tiny standard deviation floors from blowing up volatile features like Kurtosis (index 5)
+            # Kurtosis naturally fluctuates widely on small windows, so give it a realistic minimum std baseline
+            self.train_std[5] = max(self.train_std[5], 1.0)
+            
             if self.shift_sigma:
                 # Apply mandatory +3 sigma shift experiment
                 self.train_mean += 3.0 * self.train_std
@@ -73,9 +78,15 @@ class PreprocessingPipeline:
         t_mean = np.mean(temps)
         # 2. Temperature Standard Deviation
         t_std = np.std(temps)
-        # 3. Temperature Rate-of-Change (°C/min) -> (Last - First) / elapsed minutes
-        elapsed_min = (self.temp_window[-1][0] - self.temp_window[0][0]) / 60.0
-        t_roc = (temps[-1] - temps[0]) / elapsed_min if elapsed_min > 0 else 0.0
+        # 3. Temperature Rate-of-Change (°C/min) using robust linear regression slope
+        time_elapsed_arr = np.array([t for t, v in self.temp_window])
+        time_elapsed_min = (time_elapsed_arr - time_elapsed_arr[0]) / 60.0
+        if len(np.unique(time_elapsed_min)) > 1:
+            # Fit a line (y = mx + b), where m is slope (°C per minute)
+            slope, _ = np.polyfit(time_elapsed_min, temps, 1)
+            t_roc = slope
+        else:
+            t_roc = 0.0
 
         # 4. Vibration RMS
         v_rms = np.sqrt(np.mean(vibrs**2))
@@ -88,8 +99,15 @@ class PreprocessingPipeline:
         return feature_vector
 
     def normalize(self, features):
-        # z-score normalisation using saved training stats
-        return (features - self.train_mean) / (self.train_std + 1e-8)
+        # Use a safe minimum standard deviation floor to prevent division explosions
+        safe_std = np.maximum(self.train_std, 0.1)
+        
+        # Compute standard Z-score
+        normalized = (features - self.train_mean) / safe_std
+        
+        # Clip extreme outliers (vital for volatile features like kurtosis on small windows)
+        return np.clip(normalized, -10.0, 10.0)
+    
 
 def generate_training_stats_mode(broker, port):
     print("Collecting 10 minutes of clean Normal-class data to build training_stats.npy...")
