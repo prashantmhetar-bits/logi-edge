@@ -38,6 +38,7 @@ class PreprocessingPipeline:
             
             # Prevent tiny standard deviation floors from blowing up volatile features like Kurtosis (index 5)
             # Kurtosis naturally fluctuates widely on small windows, so give it a realistic minimum std baseline
+            self.train_std[2] = max(self.train_std[2], 0.2)
             self.train_std[5] = max(self.train_std[5], 1.0)
             
             if self.shift_sigma:
