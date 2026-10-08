@@ -66,32 +66,18 @@ Power remains important, but electrical power is available from the truck's onbo
 | Memory Bandwidth | Given | 12 GB/s |
 | Ridge Point | 16 ÷ 12 | 1.33 FLOPs/Byte |
 | Roofline Comparison | Actual AI (2.5) > Ridge Point (1.33) | Compute-Bound Workload |
-
-## Roofline Classification
-
-**Compute-Bound**
-
-Based on:
-
-```text
-Arithmetic Intensity > Ridge Point
-2.5 FLOPs/Byte > 1.33 FLOPs/Byte
-
+| Roofline Classification (Compute-Bound) | Based on Arithmetic Intensity > Ridge Point | **Primary Bottleneck:** Compute throughput rather than memory bandwidth |
 
 # Recommended Optimizations for a Compute-Bound Model
-
-## Optimization Techniques
 
 | Optimization Technique | Purpose |
 |------------------------|---------|
 | INT8 Quantization | Reduces computational workload and model size |
 | Structured Pruning | Removes less important parameters to reduce FLOPs |
-| Hailo NPU Acceleration | Offloads inference from CPU to a dedicated AI accelerator |
+| Hailo NPU Acceleration | Offloads inference from CPU to dedicated AI accelerator |
 | TensorFlow Lite Optimization | Enables efficient edge-device execution |
 
----
-
-## Expected Benefits
+# Expected Benefits
 
 | Performance Metric | Expected Improvement |
 |-------------------|----------------------|
@@ -100,29 +86,12 @@ Arithmetic Intensity > Ridge Point
 | Energy Consumption | Lower energy per inference |
 | Edge Deployment Efficiency | Improved throughput and resource utilization |
 
----
-
-## Final Conclusion
+# Final Conclusion
 
 | Item | Result |
-|--------|--------|
+|------|--------|
 | Arithmetic Intensity (AI) | 2.5 FLOPs/Byte |
 | Ridge Point | 1.33 FLOPs/Byte |
 | Classification | Compute-Bound |
 | Recommended Deployment Optimizations | INT8 Quantization, Structured Pruning, Hailo NPU Acceleration, TensorFlow Lite Optimization |
 | Expected Outcome | Reduced latency, smaller model size, and lower power consumption while meeting LogiEdge real-time inference requirements |
-
----
-
-### Summary
-
-The model's **Arithmetic Intensity (2.5 FLOPs/Byte)** exceeds the **Ridge Point (1.33 FLOPs/Byte)**, indicating that the workload is **compute-bound** rather than memory-bound.
-
-To improve performance on edge devices, the recommended optimizations are:
-
-- **INT8 Quantization** for reduced model size and faster inference.
-- **Structured Pruning** to decrease FLOPs by removing less important parameters.
-- **Hailo NPU Acceleration** to offload AI processing from the CPU.
-- **TensorFlow Lite Optimization** for efficient deployment on resource-constrained edge hardware.
-
-These optimizations are expected to reduce inference latency, minimize power consumption, improve throughput, and maintain compliance with LogiEdge's real-time inference requirements.
