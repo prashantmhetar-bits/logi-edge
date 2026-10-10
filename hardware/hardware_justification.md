@@ -66,13 +66,32 @@ Power remains important, but electrical power is available from the truck's onbo
 | Memory Bandwidth | Given | 12 GB/s |
 | Ridge Point | 16 ÷ 12 | 1.33 FLOPs/Byte |
 | Roofline Comparison | Actual AI (2.5) > Ridge Point (1.33) | Compute-Bound Workload |
+| Roofline Classification (Compute-Bound) | Based on Arithmetic Intensity > Ridge Point | **Primary Bottleneck:** Compute throughput rather than memory bandwidth |
 
-## Roofline Classification
+# Recommended Optimizations for a Compute-Bound Model
 
-**Compute-Bound**
+| Optimization Technique | Purpose |
+|------------------------|---------|
+| INT8 Quantization | Reduces computational workload and model size |
+| Structured Pruning | Removes less important parameters to reduce FLOPs |
+| Hailo NPU Acceleration | Offloads inference from CPU to dedicated AI accelerator |
+| TensorFlow Lite Optimization | Enables efficient edge-device execution |
 
-Based on:
+# Expected Benefits
 
-```text
-Arithmetic Intensity > Ridge Point
-2.5 FLOPs/Byte > 1.33 FLOPs/Byte
+| Performance Metric | Expected Improvement |
+|-------------------|----------------------|
+| Inference Latency | 2× to 4× lower latency |
+| Model Size | Approximately 4× smaller |
+| Energy Consumption | Lower energy per inference |
+| Edge Deployment Efficiency | Improved throughput and resource utilization |
+
+# Final Conclusion
+
+| Item | Result |
+|------|--------|
+| Arithmetic Intensity (AI) | 2.5 FLOPs/Byte |
+| Ridge Point | 1.33 FLOPs/Byte |
+| Classification | Compute-Bound |
+| Recommended Deployment Optimizations | INT8 Quantization, Structured Pruning, Hailo NPU Acceleration, TensorFlow Lite Optimization |
+| Expected Outcome | Reduced latency, smaller model size, and lower power consumption while meeting LogiEdge real-time inference requirements |
