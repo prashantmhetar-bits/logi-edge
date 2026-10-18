@@ -81,7 +81,7 @@ Generate the synthetic sensor data streams representing Normal, Warning, and Cri
   From the project root directory, run the build command targeting the inference Dockerfile:
 
   ```
-  docker build -f inference/Dockerfile -t logi-edge:v1 inference/
+  docker build -f inference/Dockerfile -t logi-edge:v1 .
   
   ```
 
@@ -92,5 +92,4 @@ Generate the synthetic sensor data streams representing Normal, Warning, and Cri
   docker run -e MODEL_PATH=cold_chain_mlp_ptq_int8.tflite -e TRUCK_ID=truck_001 logi-edge:v1
   
   ```
-
 

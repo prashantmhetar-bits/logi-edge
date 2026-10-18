@@ -1,140 +1,213 @@
-import os
-import time
 import json
-import numpy as np
-import pandas as pd
+import time
 from collections import deque
-import tensorflow as tf
+from pathlib import Path
+
 import paho.mqtt.client as mqtt
+import tensorflow as tf
+import numpy as np
+import os
 
-# Read environment variables
-MODEL_PATH = os.getenv("MODEL_PATH", "../cold_chain_mlp_fp32.keras")
-TRUCK_ID = os.getenv("TRUCK_ID", "truck_001")
-BROKER = os.getenv("MQTT_BROKER", "localhost")
-PORT = int(os.getenv("MQTT_PORT", 1883))
+# Configuration from environment variables
+TRUCK_ID = os.environ.get("TRUCK_ID", "truck_001")
+MODEL_PATH = os.environ.get("MODEL_PATH", "cold_chain_mlp_fp32.keras")
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
 
-TOPIC_INFERENCE = f"logi-edge/trucks/{TRUCK_ID}/inference"
+TOPIC_TELEMETRY = f"truck/sensor/#"
+TOPIC_INFERENCE = f"logibridge/trucks/{TRUCK_ID}/inference"
+WINDOW_SIZE_SEC = 30.0
+STEP_SIZE_SEC = 10.0
 
-print(f"🚀 Initializing Edge Inference Service...")
-print(f"-> Target Model: {MODEL_PATH}")
-print(f"-> Publishing to MQTT Topic: {TOPIC_INFERENCE}")
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+STATS_PATH = PROJECT_DIR / "data_pipeline" / "training_stats.npy"
 
-# Load TFLite Model & Allocate Tensors
-interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-interpreter.allocate_tensors()
-input_details = interpreter.get_input_details()
-output_details = interpreter.get_output_details()
+print("=" * 50)
+print("🚀 Initializing Edge Inference Service...")
+print(f"-> Target Truck ID: {TRUCK_ID}")
+print(f"-> Target Model File: {MODEL_PATH}")
+print(f"-> MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
+print(f"-> Subscribing to: {TOPIC_TELEMETRY}")
+print(f"-> Publishing to: {TOPIC_INFERENCE}")
+print(f"-> Training statistics: {STATS_PATH}")
+print("=" * 50)
 
-# Buffers for sliding window filtering
+if not STATS_PATH.is_file():
+    raise FileNotFoundError(
+        f"Training statistics not found at {STATS_PATH}. "
+        "Generate data_pipeline/training_stats.npy before starting inference."
+    )
+
+stats = np.load(STATS_PATH, allow_pickle=True).item()
+if not isinstance(stats, dict) or "mean" not in stats or "std" not in stats:
+    raise ValueError(f"{STATS_PATH} must contain 'mean' and 'std' arrays.")
+
+train_mean = np.asarray(stats["mean"], dtype=np.float32)
+train_std = np.asarray(stats["std"], dtype=np.float32)
+if train_mean.shape != (6,) or train_std.shape != (6,):
+    raise ValueError(
+        f"{STATS_PATH} must contain six means and standard deviations; "
+        f"got shapes {train_mean.shape} and {train_std.shape}."
+    )
+if not np.all(np.isfinite(train_mean)) or not np.all(np.isfinite(train_std)):
+    raise ValueError(f"{STATS_PATH} contains non-finite values.")
+if np.any(train_std < 0):
+    raise ValueError(f"{STATS_PATH} contains negative standard deviations.")
+
+train_std = train_std.copy()
+train_std[2] = max(train_std[2], 0.2)
+train_std[5] = max(train_std[5], 1.0)
+safe_std = np.maximum(train_std, 0.1)
+
 temp_buffer = deque(maxlen=5)
 vib_buffer = deque(maxlen=5)
 temp_window = deque()
 vib_window = deque()
-last_step_time = time.time()
+last_window_eval = time.time()
 
-# Load runtime normalization stats (training_stats.npy)
-stats_path = "training_stats.npy"
-if os.path.exists(stats_path):
-    stats = np.load(stats_path, allow_pickle=True).item()
-    mean_vec = stats['mean']
-    std_vec = stats['std']
-    print("✓ Loaded runtime normalization stats successfully.")
+# Load Model dynamically based on extension (.tflite vs .keras)
+if MODEL_PATH.endswith(".tflite"):
+    print(f"-> Loading TFLite Model runtime...")
+    interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+    interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    is_tflite = True
 else:
-    print("⚠️ Warning: training_stats.npy not found! Using zero-mean unit-variance defaults.")
-    mean_vec = np.zeros(6)
-    std_vec = np.ones(6)
+    print(f"-> Loading Keras Model: {MODEL_PATH}...")
+    keras_model = tf.keras.models.load_model(MODEL_PATH)
+    is_tflite = False
+print("-> Model loaded successfully!")
 
-def process_and_infer(client, temp_val, vib_val):
-    global last_step_time
-    current_time = time.time()
+def on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
+        print("[MQTT] Connected successfully to MQTT Broker!")
+        client.subscribe(TOPIC_TELEMETRY)
+    else:
+        print(f"[MQTT] Failed to connect, return code {reason_code}")
 
-    # 1. Filtering (5-sample moving average)
-    temp_buffer.append(temp_val)
-    vib_buffer.append(vib_val)
-    filtered_temp = sum(temp_buffer) / len(temp_buffer)
-    filtered_vib = sum(vib_buffer) / len(vib_buffer)
+def on_connect_fail(client, userdata):
+    print(f"[MQTT] Could not connect to broker at {MQTT_BROKER}:{MQTT_PORT}; retrying...")
 
-    temp_window.append((current_time, filtered_temp))
-    vib_window.append((current_time, filtered_vib))
+def extract_features(current_time):
+    cutoff = current_time - WINDOW_SIZE_SEC
+    while temp_window and temp_window[0][0] < cutoff:
+        temp_window.popleft()
+    while vib_window and vib_window[0][0] < cutoff:
+        vib_window.popleft()
 
-    # 2. Feature Extraction per 30s window (10s step)
-    if current_time - last_step_time >= 10.0:
-        last_step_time = current_time
-        
-        # Prune old window data (>30s)
-        cutoff = current_time - 30.0
-        while temp_window and temp_window[0][0] < cutoff: temp_window.popleft()
-        while vib_window and vib_window[0][0] < cutoff: vib_window.popleft()
+    if len(temp_window) < 5 or len(vib_window) < 3:
+        return None
 
-        if len(temp_window) >= 5 and len(vib_window) >= 3:
-            temps = np.array([v for t, v in temp_window])
-            vibrs = np.array([v for t, v in vib_window])
+    temps = np.asarray([value for _, value in temp_window], dtype=np.float32)
+    vibrs = np.asarray([value for _, value in vib_window], dtype=np.float32)
 
-            t_mean = np.mean(temps)
-            t_std = np.std(temps)
-            time_arr = np.array([t for t, v in temp_window])
-            time_min = (time_arr - time_arr[0]) / 60.0
-            t_roc = np.polyfit(time_min, temps, 1)[0] if len(np.unique(time_min)) > 1 else 0.0
+    temp_times = np.asarray([timestamp for timestamp, _ in temp_window])
+    elapsed_minutes = (temp_times - temp_times[0]) / 60.0
+    if len(np.unique(elapsed_minutes)) > 1:
+        temp_rate, _ = np.polyfit(elapsed_minutes, temps, 1)
+    else:
+        temp_rate = 0.0
 
-            v_rms = np.sqrt(np.mean(vibrs**2))
-            v_peak = np.max(np.abs(vibrs))
-            v_kurt = np.array(vibrs).var() # simplified for stream
+    vib_std = np.std(vibrs)
+    if len(vibrs) > 3 and vib_std > 1e-5:
+        centered_vibration = vibrs - np.mean(vibrs)
+        vib_kurtosis = np.mean((centered_vibration / vib_std) ** 4) - 3.0
+    else:
+        vib_kurtosis = 0.0
 
-            raw_features = np.array([t_mean, t_std, t_roc, v_rms, v_peak, v_kurt], dtype=np.float32)
+    return np.array(
+        [
+            np.mean(temps),
+            np.std(temps),
+            temp_rate,
+            np.sqrt(np.mean(vibrs**2)),
+            np.max(np.abs(vibrs)),
+            vib_kurtosis,
+        ],
+        dtype=np.float32,
+    )
 
-            # 3. Normalisation using loaded stats
-            norm_features = (raw_features - mean_vec) / (std_vec + 1e-8)
-
-            # 4. Model Inference
-            input_data = np.expand_dims(norm_features, axis=0)
-            
-            if MODEL_PATH.endswith(".tflite"):
-                if input_details[0]['dtype'] == np.int8:
-                    # Quantize input if model expects INT8
-                    input_scale, input_zero_point = input_details[0]['quantization']
-                    input_data = np.clip(np.round(input_data / input_scale + input_zero_point), -128, 127).astype(np.int8)
-                
-                interpreter.set_tensor(input_details[0]['index'], input_data)
-                interpreter.invoke()
-                output_data = interpreter.get_tensor(output_details[0]['index'])
-                predicted_class = int(np.argmax(output_data[0]))
-            else:
-                # Fallback for keras model if tested locally
-                predicted_class = 0
-
-            class_labels = {0: "Normal", 1: "Warning", 2: "Critical"}
-            result_payload = {
-                "truck_id": TRUCK_ID,
-                "timestamp": current_time,
-                "predicted_class": predicted_class,
-                "status": class_labels.get(predicted_class, "Unknown"),
-                "features": raw_features.tolist()
-            }
-
-            # 5. Publish Result to MQTT
-            client.publish(TOPIC_INFERENCE, json.dumps(result_payload))
-            print(f"[{TRUCK_ID}] Published Inference -> Status: {class_labels.get(predicted_class)}")
-
-# MQTT Client Setup
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
-def on_message(c, ud, msg):
+def on_message(client, userdata, msg):
+    global last_window_eval
     try:
         payload = json.loads(msg.payload.decode())
-        val = payload.get("value", 0.0)
-        if "temperature" in msg.topic:
-            # We pair incoming messages or trigger on temp
-            pass
-    except:
-        pass
+        print(f"[Data In] Received telemetry from simulator on topic: {msg.topic}")
 
-client.connect(BROKER, PORT, 60)
-client.subscribe("truck/sensor/#")
-print("Listening for sensor streams...")
+        value = payload.get("value")
+        if value is None:
+            return
+        value = float(value)
+        if not np.isfinite(value):
+            return
+
+        current_time = time.time()
+        if msg.topic == "truck/sensor/temperature":
+            temp_buffer.append(value)
+            filtered_value = sum(temp_buffer) / len(temp_buffer)
+            temp_window.append((current_time, filtered_value))
+        elif msg.topic == "truck/sensor/vibration":
+            vib_buffer.append(value)
+            filtered_value = sum(vib_buffer) / len(vib_buffer)
+            vib_window.append((current_time, filtered_value))
+        else:
+            return
+
+        if current_time - last_window_eval < STEP_SIZE_SEC:
+            return
+        last_window_eval = current_time
+
+        features = extract_features(current_time)
+        if features is None:
+            return
+
+        normalized_features = np.clip(
+            (features - train_mean) / safe_std, -10.0, 10.0
+        ).reshape(1, 6)
+        print(f"[Inference] Running prediction using {MODEL_PATH}...")
+        if is_tflite:
+            interpreter.set_tensor(input_details[0]["index"], normalized_features)
+            interpreter.invoke()
+            output_data = interpreter.get_tensor(output_details[0]["index"])
+        else:
+            output_data = keras_model.predict(normalized_features, verbose=0)
+
+        predicted_class = int(np.argmax(output_data[0]))
+        confidence = float(np.max(output_data[0]))
+        status_map = {0: "NORMAL", 1: "WARNING", 2: "CRITICAL"}
+        status = status_map.get(predicted_class, "UNKNOWN")
+
+        result_payload = {
+            "truck_id": TRUCK_ID,
+            "status": status,
+            "confidence": confidence,
+            "timestamp": time.time(),
+        }
+        client.publish(TOPIC_INFERENCE, json.dumps(result_payload))
+        print(
+            f"[Publish Success] Sent result -> Status: {status} "
+            f"(Confidence: {confidence:.2f})"
+        )
+    except Exception as e:
+        print(f"[Error] Failed to process incoming message: {e}")
+
+# Setup MQTT Client
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+client.on_connect = on_connect
+client.on_connect_fail = on_connect_fail
+client.on_message = on_message
+
+print(f"[MQTT] Connecting to broker at {MQTT_BROKER}:{MQTT_PORT}...", flush=True)
+client.connect_async(MQTT_BROKER, MQTT_PORT, 60)
+
+# Start network loop to continuously listen for simulator data
 client.loop_start()
 
-# Keep alive loop (simulating live ingestion)
+print("-> Edge service started; waiting for MQTT broker connection... (Press Ctrl+C to exit)", flush=True)
 try:
     while True:
         time.sleep(1)
 except KeyboardInterrupt:
+    print("\n-> Shutting down Edge Inference Service gracefully...")
     client.loop_stop()
+    client.disconnect()
