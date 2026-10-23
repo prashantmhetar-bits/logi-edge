@@ -1,5 +1,5 @@
-tensorflow
 numpy
 pandas
 paho-mqtt
+tensorflow
 scikit-learn

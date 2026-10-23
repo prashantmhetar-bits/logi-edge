@@ -25,6 +25,41 @@ df = pd.concat(dataframes, ignore_index=True)
 X = df.iloc[:, :-1].values.astype(np.float32)
 y = df.iloc[:, -1].values.astype(np.int32)
 
+# Normalize using the clean-data statistics used by the live preprocessing pipeline.
+stats_file = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data_pipeline",
+    "training_stats.npy",
+)
+if not os.path.exists(stats_file):
+    raise FileNotFoundError(
+        f"{stats_file} is missing. Run data_pipeline/preprocessing.py "
+        "in generate_stats mode first."
+    )
+
+stats = np.load(stats_file, allow_pickle=True).item()
+if not isinstance(stats, dict) or "mean" not in stats or "std" not in stats:
+    raise ValueError(f"{stats_file} must contain 'mean' and 'std' arrays.")
+
+train_mean = np.asarray(stats["mean"], dtype=np.float32)
+train_std = np.asarray(stats["std"], dtype=np.float32)
+if train_mean.shape != (X.shape[1],) or train_std.shape != (X.shape[1],):
+    raise ValueError(
+        f"Expected six training means and standard deviations in {stats_file}; "
+        f"got shapes {train_mean.shape} and {train_std.shape}."
+    )
+if not np.all(np.isfinite(train_mean)) or not np.all(np.isfinite(train_std)):
+    raise ValueError(f"{stats_file} contains non-finite values.")
+if np.any(train_std < 0):
+    raise ValueError(f"{stats_file} contains negative standard deviations.")
+
+# Match the standard-deviation floors and clipping used during live preprocessing.
+train_std[2] = max(train_std[2], 0.2)
+train_std[5] = max(train_std[5], 1.0)
+safe_std = np.maximum(train_std, 0.1)
+X = np.clip((X - train_mean) / safe_std, -10.0, 10.0)
+print(f"✓ Normalized features using {stats_file}")
+
 print(f"\nTotal combined dataset samples: {len(X)}")
 
 # Stratified 20% validation split
@@ -51,7 +86,7 @@ model.compile(
 print("\nTraining model...")
 history = model.fit(
     X_train, y_train,
-    epochs=40,
+    epochs=10,
     batch_size=16,
     validation_data=(X_val, y_val),
     verbose=1
