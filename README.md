@@ -109,6 +109,18 @@ Monitor the last 100 inferences, PSI printed every 60 s, `[LOGIBRIDGE DRIFT ALER
 .\.venv\Scripts\python.exe monitoring\drift_monitor.py --mode monitor --log monitoring\psi_log.csv
 ```
 
-### 6. CI
+### 6. Ansible Deployment (Task E2)
 
-`.github/workflows/ci.yml` runs on every push: sanity + unit tests → M1 training (gates: val accuracy > 88%, Critical recall > 95%) → M2 / M3 conversion (gated on INT8 accuracy) → image build → MQTT integration test of all three variants from the same image via `MODEL_PATH`.
+`deployment/logibridge_deploy.yml` deploys the inference container to the edge node in exactly 7 idempotent tasks; a second run with no changes reports `changed=0`. Ansible does not run natively on Windows, so use WSL2 (Ubuntu) with Docker Desktop's WSL integration enabled:
+
+```
+python3 -m venv ~/ansible-venv && ~/ansible-venv/bin/pip install ansible==14.5.0 docker==7.2.0
+docker run -d --name registry -p 5000:5000 registry:2
+docker tag logi-edge:v1 localhost:5000/logi-edge:v1 && docker push localhost:5000/logi-edge:v1
+~/ansible-venv/bin/ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml -K
+~/ansible-venv/bin/ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml -K
+```
+
+### 7. CI
+
+`.github/workflows/ci.yml` runs on every push: sanity + unit tests → M1 training (gates: val accuracy > 88%, Critical recall > 95%) → M2 / M3 conversion (gated on INT8 accuracy) → image build → MQTT integration test of all three variants from the same image via `MODEL_PATH` → Ansible deployment run twice (second run must report `changed=0`).

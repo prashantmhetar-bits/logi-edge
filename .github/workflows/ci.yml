@@ -1,4 +1,4 @@
-name: logi-edge-ci
+name: LogiEdge Continuous Integration
 
 on:
   push:
@@ -16,6 +16,7 @@ env:
   TRAIN_DEPS: tensorflow==2.21.0 keras==3.15.1 numpy==2.4.6 pandas==3.1.0 scikit-learn==1.9.1
   PRUNE_DEPS: tensorflow-model-optimization==0.8.1 tf-keras==2.21.0
   IMAGE_NAME: logi-edge
+  ANSIBLE_DEPS: ansible==14.5.0 ansible-lint==26.10.1 docker==7.2.0
 
 defaults:
   run:
@@ -23,7 +24,7 @@ defaults:
 
 jobs:
   sanity:
-    name: Repo sanity check
+    name: Repository Validation and Unit Testing
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -45,7 +46,8 @@ jobs:
             data_pipeline/simulator.py data_pipeline/preprocessing.py data_pipeline/training_stats.npy \
             training/dataset_utils.py training/model_eval.py training/generate_dataset.py training/train_model.py training/convert_ptq.py training/prune_quantise.py \
             inference/Dockerfile inference/inference_service.py inference/requirements.txt \
-            monitoring/drift_monitor.py scripts/integration_test.sh tests/test_drift_monitor.py
+            monitoring/drift_monitor.py scripts/integration_test.sh tests/test_drift_monitor.py \
+            deployment/logibridge_deploy.yml deployment/inventory.ini
           do
             test -s "$f" || { echo "::error::missing or empty: $f"; exit 1; }
             echo "ok  $f"
@@ -60,7 +62,7 @@ jobs:
           pytest -q tests
 
   train-m1:
-    name: Train M1 (FP32 baseline)
+    name: "Model Training: M1 FP32 Baseline"
     needs: sanity
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -99,7 +101,7 @@ jobs:
           retention-days: 14
 
   convert-m2:
-    name: Convert M2 (PTQ INT8)
+    name: "Model Optimisation: M2 Post-Training INT8 Quantisation"
     needs: train-m1
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -140,7 +142,7 @@ jobs:
           retention-days: 14
 
   prune-m3:
-    name: Prune + quantise M3
+    name: "Model Optimisation: M3 Structured Pruning and INT8 Quantisation"
     needs: train-m1
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -182,7 +184,7 @@ jobs:
           retention-days: 14
 
   build-image:
-    name: Build image + MQTT integration test (M1, M2, M3)
+    name: Container Build, Integration Testing and Deployment Verification
     needs: [train-m1, convert-m2, prune-m3]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -259,6 +261,44 @@ jobs:
       - name: Integration - M3 pruned INT8 (same image, MODEL_PATH switch)
         run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_pruned_int8.tflite "$TRUCK_ID"
 
+      - name: Install Ansible (E2)
+        run: pip install $ANSIBLE_DEPS
+
+      - name: Lint playbook (E2)
+        run: ansible-lint deployment/logibridge_deploy.yml
+
+      - name: Push image to local registry (E2)
+        run: |
+          docker run -d --name registry -p 5000:5000 registry:2
+          for i in $(seq 1 30); do curl -sf http://localhost:5000/v2/ > /dev/null && break; sleep 1; done
+          docker tag "$IMAGE_NAME:$GITHUB_SHA" localhost:5000/logi-edge:v1
+          docker push localhost:5000/logi-edge:v1
+          docker rmi localhost:5000/logi-edge:v1
+
+      - name: Ansible deploy - run 1 and run 2 must report changed=0 (E2)
+        env:
+          ANSIBLE_FORCE_COLOR: "0"
+          ANSIBLE_LOCALHOST_WARNING: "False"
+        run: |
+          ref="$RUNNER_TEMP/it-cold_chain_mlp_ptq_int8/reference_dist.json"
+          for run in 1 2; do
+            echo "=== ansible-playbook run $run ==="
+            ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml \
+              -e reference_src="$ref" -e truck_id=truck_ansible | tee "$RUNNER_TEMP/ansible_run$run.log"
+          done
+          recap() { grep -E '^truck_001 +:' "$RUNNER_TEMP/ansible_run$1.log"; }
+          echo "run 1: $(recap 1)"
+          echo "run 2: $(recap 2)"
+          recap 1 | grep -Eq 'changed=[1-9]' || { echo "::error::run 1 deployed nothing"; exit 1; }
+          recap 2 | grep -Eq 'changed=0 .*failed=0' || { echo "::error::run 2 is not idempotent"; exit 1; }
+
+      - name: Deployed container publishes inference (E2)
+        run: |
+          docker exec mosquitto mosquitto_sub -h localhost \
+            -t "logibridge/trucks/truck_ansible/inference" -C 1 -W 90 | tee "$RUNNER_TEMP/ansible_payload.json"
+          test -s "$RUNNER_TEMP/ansible_payload.json"
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' logibridge-inference | grep MODEL_PATH
+
       - name: Dump logs
         if: always()
         run: |
@@ -267,9 +307,10 @@ jobs:
           done
           echo "::group::simulator"; tail -n 30 "$RUNNER_TEMP/simulator.log" || true; echo "::endgroup::"
           echo "::group::mosquitto"; docker logs mosquitto 2>&1 | tail -n 30 || true; echo "::endgroup::"
+          echo "::group::ansible-deployed container"; docker logs logibridge-inference 2>&1 | tail -n 30 || true; echo "::endgroup::"
 
       - name: Cleanup
         if: always()
         run: |
           kill "$(cat "$RUNNER_TEMP/simulator.pid" 2>/dev/null)" 2>/dev/null || true
-          docker rm -f mosquitto 2>/dev/null || true
+          docker rm -f mosquitto registry logibridge-inference 2>/dev/null || true
