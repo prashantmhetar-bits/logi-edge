@@ -116,29 +116,34 @@ def generate_training_stats_mode(broker, port):
     
     collected_features = []
     pipeline = PreprocessingPipeline(shift_sigma=False)
-    
+    last_step_time = time.time()
+
     def on_message(client, userdata, msg):
+        nonlocal last_step_time
         try:
             payload = json.loads(msg.payload.decode())
             current_time = time.time()
             val = payload.get("value")
-            
+            if val is None:
+                return
+
             if msg.topic == "truck/sensor/temperature":
                 filtered = pipeline.apply_moving_average("temperature", val)
                 pipeline.temp_window.append((current_time, filtered))
             elif msg.topic == "truck/sensor/vibration":
                 filtered = pipeline.apply_moving_average("vibration", val)
-                pipeline.vib_buffer.append((current_time, filtered))
                 pipeline.vib_window.append((current_time, filtered))
-                
-                # Every time vibration arrives, check if we can extract a feature vector
+
+            # Same 30 s window / 10 s step as generate_dataset.py and the inference service
+            if current_time - last_step_time >= STEP_SIZE_SEC:
+                last_step_time = current_time
                 feat = pipeline.extract_features(current_time)
                 if feat is not None:
                     collected_features.append(feat)
                     if len(collected_features) % 10 == 0:
                         print(f"Collected {len(collected_features)} feature windows...")
         except Exception as e:
-            pass
+            print(f"Error processing message: {e}")
 
     client = mqtt.Client()
     client.on_message = on_message

@@ -1,0 +1,8 @@
+# Allowlist: the inference image needs only these files from the build context
+*
+!inference/inference_service.py
+!inference/requirements.txt
+!data_pipeline/training_stats.npy
+!cold_chain_mlp_fp32.keras
+!cold_chain_mlp_ptq_int8.tflite
+!cold_chain_mlp_pruned_int8.tflite

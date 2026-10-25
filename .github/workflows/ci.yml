@@ -1,0 +1,323 @@
+name: LogiEdge Continuous Integration
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  TRAIN_DEPS: tensorflow==2.21.0 keras==3.15.1 numpy==2.4.6 pandas==3.1.0 scikit-learn==1.9.1
+  PRUNE_DEPS: tensorflow-model-optimization==0.8.1 tf-keras==2.21.0
+  IMAGE_NAME: logi-edge
+  ANSIBLE_DEPS: ansible==14.5.0 ansible-lint==26.10.1 docker==7.2.0
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sanity:
+    name: Repository Validation and Unit Testing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Show repository layout
+        run: find . -path ./.git -prune -o -type f -print | sort
+
+      - name: Verify required files exist
+        run: |
+          for f in \
+            dataset_normal.csv dataset_warning.csv dataset_critical.csv \
+            data_pipeline/simulator.py data_pipeline/preprocessing.py data_pipeline/training_stats.npy \
+            training/dataset_utils.py training/model_eval.py training/generate_dataset.py training/train_model.py training/convert_ptq.py training/prune_quantise.py \
+            inference/Dockerfile inference/inference_service.py inference/requirements.txt \
+            monitoring/drift_monitor.py scripts/integration_test.sh tests/test_drift_monitor.py \
+            deployment/logibridge_deploy.yml deployment/inventory.ini
+          do
+            test -s "$f" || { echo "::error::missing or empty: $f"; exit 1; }
+            echo "ok  $f"
+          done
+
+      - name: Python syntax check
+        run: python -m compileall -q data_pipeline training inference monitoring tests
+
+      - name: Unit tests
+        run: |
+          pip install pytest paho-mqtt==2.1.0
+          pytest -q tests
+
+  train-m1:
+    name: "Model Training: M1 FP32 Baseline"
+    needs: sanity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install $TRAIN_DEPS
+          pip freeze > pip-freeze-train.txt
+          python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
+
+      - name: Train M1 (gates - accuracy > 88%, Critical recall > 95%)
+        run: python training/train_model.py 2>&1 | tee m1_train.log
+
+      - name: M1 metrics
+        run: cat metrics_m1_fp32.json
+
+      - name: Upload M1 artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: model-m1-fp32
+          path: |
+            cold_chain_mlp_fp32.keras
+            metrics_m1_fp32.json
+            m1_train.log
+            pip-freeze-train.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  convert-m2:
+    name: "Model Optimisation: M2 Post-Training INT8 Quantisation"
+    needs: train-m1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install $TRAIN_DEPS
+
+      - name: Download M1 model
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: model-m1-fp32
+
+      - name: Convert M2 (calibrate on normalised training split, gate on INT8 accuracy)
+        run: python training/convert_ptq.py 2>&1 | tee m2_convert.log
+
+      - name: M2 metrics
+        run: cat metrics_m2_ptq_int8.json
+
+      - name: Upload M2 artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: model-m2-ptq-int8
+          path: |
+            cold_chain_mlp_ptq_int8.tflite
+            metrics_m2_ptq_int8.json
+            m2_convert.log
+          if-no-files-found: error
+          retention-days: 14
+
+  prune-m3:
+    name: "Model Optimisation: M3 Structured Pruning and INT8 Quantisation"
+    needs: train-m1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install training + pruning dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install $TRAIN_DEPS $PRUNE_DEPS
+
+      - name: Download M1 model
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: model-m1-fp32
+
+      - name: Structured pruning of M1 + INT8 PTQ (gate on INT8 accuracy)
+        run: python training/prune_quantise.py 2>&1 | tee m3_prune.log
+
+      - name: M3 metrics
+        run: cat metrics_m3_pruned_int8.json
+
+      - name: Upload M3 artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: model-m3-pruned-int8
+          path: |
+            cold_chain_mlp_pruned_int8.tflite
+            cold_chain_mlp_pruned.keras
+            metrics_m3_pruned_int8.json
+            m3_prune.log
+          if-no-files-found: error
+          retention-days: 14
+
+  build-image:
+    name: Container Build, Integration Testing and Deployment Verification
+    needs: [train-m1, convert-m2, prune-m3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TRUCK_ID: truck_001
+      ANOMALY_MODE: combined
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download M1 model
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: model-m1-fp32
+
+      - name: Download M2 model
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: model-m2-ptq-int8
+
+      - name: Download M3 model
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: model-m3-pruned-int8
+
+      - name: Models in build context
+        run: ls -la cold_chain_mlp_fp32.keras cold_chain_mlp_ptq_int8.tflite cold_chain_mlp_pruned_int8.tflite
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: inference/Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image size and layers
+        run: |
+          docker image ls "$IMAGE_NAME"
+          docker history "$IMAGE_NAME:$GITHUB_SHA"
+          echo "runs as user: $(docker run --rm --entrypoint id "$IMAGE_NAME:$GITHUB_SHA" -un)"
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install simulator + monitor dependencies
+        run: pip install paho-mqtt==2.1.0
+
+      - name: Start Mosquitto broker
+        run: |
+          printf 'listener 1883\nallow_anonymous true\n' > "$RUNNER_TEMP/mosquitto.conf"
+          docker run -d --name mosquitto -p 1883:1883 \
+            -v "$RUNNER_TEMP/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
+            eclipse-mosquitto:2
+
+      - name: Start simulator
+        run: |
+          nohup python data_pipeline/simulator.py --anomaly "$ANOMALY_MODE" > "$RUNNER_TEMP/simulator.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/simulator.pid"
+
+      - name: Integration - M1 FP32
+        run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_fp32.keras "$TRUCK_ID"
+
+      - name: Integration - M2 PTQ INT8 (same image, MODEL_PATH switch)
+        run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_ptq_int8.tflite "$TRUCK_ID"
+
+      - name: Integration - M3 pruned INT8 (same image, MODEL_PATH switch)
+        run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_pruned_int8.tflite "$TRUCK_ID"
+
+      - name: Install Ansible in an isolated Python 3.12 environment (E2)
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/ansible-venv"
+          "$RUNNER_TEMP/ansible-venv/bin/pip" install --quiet $ANSIBLE_DEPS
+          "$RUNNER_TEMP/ansible-venv/bin/ansible" --version
+
+      - name: Lint playbook (E2)
+        run: |
+          export PATH="$RUNNER_TEMP/ansible-venv/bin:$PATH"
+          ansible-lint deployment/logibridge_deploy.yml
+
+      - name: Push image to local registry (E2)
+        run: |
+          docker run -d --name registry -p 5000:5000 registry:2
+          for i in $(seq 1 30); do curl -sf http://localhost:5000/v2/ > /dev/null && break; sleep 1; done
+          docker tag "$IMAGE_NAME:$GITHUB_SHA" localhost:5000/logi-edge:v1
+          docker push localhost:5000/logi-edge:v1
+          docker rmi localhost:5000/logi-edge:v1
+
+      - name: Ansible deploy - run 1 and run 2 must report changed=0 (E2)
+        env:
+          ANSIBLE_FORCE_COLOR: "0"
+          ANSIBLE_LOCALHOST_WARNING: "False"
+        run: |
+          export PATH="$RUNNER_TEMP/ansible-venv/bin:$PATH"
+          ref="$RUNNER_TEMP/it-cold_chain_mlp_ptq_int8/reference_dist.json"
+          for run in 1 2; do
+            echo "=== ansible-playbook run $run ==="
+            ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml \
+              -e reference_src="$ref" -e truck_id=truck_ansible | tee "$RUNNER_TEMP/ansible_run$run.log"
+          done
+          recap() { grep -E '^truck_001 +:' "$RUNNER_TEMP/ansible_run$1.log"; }
+          echo "run 1: $(recap 1)"
+          echo "run 2: $(recap 2)"
+          recap 1 | grep -Eq 'changed=[1-9]' || { echo "::error::run 1 deployed nothing"; exit 1; }
+          recap 2 | grep -Eq 'changed=0 .*failed=0' || { echo "::error::run 2 is not idempotent"; exit 1; }
+
+      - name: Deployed container publishes inference (E2)
+        run: |
+          docker exec mosquitto mosquitto_sub -h localhost \
+            -t "logibridge/trucks/truck_ansible/inference" -C 1 -W 90 | tee "$RUNNER_TEMP/ansible_payload.json"
+          test -s "$RUNNER_TEMP/ansible_payload.json"
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' logibridge-inference | grep MODEL_PATH
+
+      - name: Dump logs
+        if: always()
+        run: |
+          for f in "$RUNNER_TEMP"/it-*/container.log; do
+            if [ -f "$f" ]; then echo "::group::$f"; tail -n 60 "$f"; echo "::endgroup::"; fi
+          done
+          echo "::group::simulator"; tail -n 30 "$RUNNER_TEMP/simulator.log" || true; echo "::endgroup::"
+          echo "::group::mosquitto"; docker logs mosquitto 2>&1 | tail -n 30 || true; echo "::endgroup::"
+          echo "::group::ansible-deployed container"; docker logs logibridge-inference 2>&1 | tail -n 30 || true; echo "::endgroup::"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/simulator.pid" 2>/dev/null)" 2>/dev/null || true
+          docker rm -f mosquitto registry logibridge-inference 2>/dev/null || true

@@ -166,9 +166,19 @@ def on_message(client, userdata, msg):
         ).reshape(1, 6)
         print(f"[Inference] Running prediction using {MODEL_PATH}...")
         if is_tflite:
-            interpreter.set_tensor(input_details[0]["index"], normalized_features)
+            inp, out = input_details[0], output_details[0]
+            model_input = normalized_features.astype(np.float32)
+            if inp["dtype"] == np.int8:
+                in_scale, in_zero_point = inp["quantization"]
+                model_input = np.clip(
+                    np.round(model_input / in_scale + in_zero_point), -128, 127
+                ).astype(np.int8)
+            interpreter.set_tensor(inp["index"], model_input)
             interpreter.invoke()
-            output_data = interpreter.get_tensor(output_details[0]["index"])
+            output_data = interpreter.get_tensor(out["index"])
+            if out["dtype"] == np.int8:
+                out_scale, out_zero_point = out["quantization"]
+                output_data = (output_data.astype(np.float32) - out_zero_point) * out_scale
         else:
             output_data = keras_model.predict(normalized_features, verbose=0)
 
@@ -181,6 +191,7 @@ def on_message(client, userdata, msg):
             "truck_id": TRUCK_ID,
             "status": status,
             "confidence": confidence,
+            "probabilities": [float(p) for p in output_data[0]],
             "timestamp": time.time(),
         }
         client.publish(TOPIC_INFERENCE, json.dumps(result_payload))
