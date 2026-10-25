@@ -13,6 +13,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: "3.11"
+  TRAIN_DEPS: tensorflow==2.21.0 keras==3.15.1 numpy==2.4.6 pandas==3.1.0 scikit-learn==1.9.1
 
 defaults:
   run:
@@ -67,7 +68,7 @@ jobs:
       - name: Install training dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install tensorflow pandas numpy scikit-learn
+          pip install $TRAIN_DEPS
           pip freeze > pip-freeze-train.txt
           python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
 
@@ -87,5 +88,58 @@ jobs:
             cold_chain_mlp_fp32.keras
             m1_train.log
             pip-freeze-train.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  convert-m2:
+    name: Convert M2 (PTQ INT8)
+    needs: train-m1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install $TRAIN_DEPS
+
+      - name: Download M1 model
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: model-m1-fp32
+
+      - name: Convert M1 to INT8 TFLite
+        run: python training/convert_ptq.py 2>&1 | tee m2_convert.log
+
+      - name: Inspect M2 model
+        run: |
+          test -s cold_chain_mlp_ptq_int8.tflite || { echo "::error::M2 model not produced"; exit 1; }
+          python - <<'PY'
+          import os
+          import tensorflow as tf
+          path = "cold_chain_mlp_ptq_int8.tflite"
+          interp = tf.lite.Interpreter(model_path=path)
+          interp.allocate_tensors()
+          i = interp.get_input_details()[0]
+          o = interp.get_output_details()[0]
+          print(f"file size : {os.path.getsize(path) / 1024:.1f} KB")
+          print(f"input     : shape={i['shape'].tolist()} dtype={i['dtype'].__name__} quant(scale,zp)={i['quantization']}")
+          print(f"output    : shape={o['shape'].tolist()} dtype={o['dtype'].__name__} quant(scale,zp)={o['quantization']}")
+          PY
+
+      - name: Upload M2 artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: model-m2-ptq-int8
+          path: |
+            cold_chain_mlp_ptq_int8.tflite
+            m2_convert.log
           if-no-files-found: error
           retention-days: 14
