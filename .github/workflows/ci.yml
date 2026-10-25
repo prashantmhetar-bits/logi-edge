@@ -261,11 +261,17 @@ jobs:
       - name: Integration - M3 pruned INT8 (same image, MODEL_PATH switch)
         run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_pruned_int8.tflite "$TRUCK_ID"
 
-      - name: Install Ansible (E2)
-        run: pip install $ANSIBLE_DEPS
+      - name: Install Ansible in an isolated Python 3.12 environment (E2)
+        run: |
+          /usr/bin/python3 --version
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/ansible-venv"
+          "$RUNNER_TEMP/ansible-venv/bin/pip" install --quiet $ANSIBLE_DEPS
+          "$RUNNER_TEMP/ansible-venv/bin/ansible" --version
 
       - name: Lint playbook (E2)
-        run: ansible-lint deployment/logibridge_deploy.yml
+        run: |
+          export PATH="$RUNNER_TEMP/ansible-venv/bin:$PATH"
+          ansible-lint deployment/logibridge_deploy.yml
 
       - name: Push image to local registry (E2)
         run: |
@@ -280,6 +286,7 @@ jobs:
           ANSIBLE_FORCE_COLOR: "0"
           ANSIBLE_LOCALHOST_WARNING: "False"
         run: |
+          export PATH="$RUNNER_TEMP/ansible-venv/bin:$PATH"
           ref="$RUNNER_TEMP/it-cold_chain_mlp_ptq_int8/reference_dist.json"
           for run in 1 2; do
             echo "=== ansible-playbook run $run ==="

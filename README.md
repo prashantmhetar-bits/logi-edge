@@ -111,7 +111,7 @@ Monitor the last 100 inferences, PSI printed every 60 s, `[LOGIBRIDGE DRIFT ALER
 
 ### 6. Ansible Deployment (Task E2)
 
-`deployment/logibridge_deploy.yml` deploys the inference container to the edge node in exactly 7 idempotent tasks; a second run with no changes reports `changed=0`. Ansible does not run natively on Windows, so use WSL2 (Ubuntu) with Docker Desktop's WSL integration enabled:
+`deployment/logibridge_deploy.yml` deploys the inference container to the edge node in exactly 7 idempotent tasks; a second run with no changes reports `changed=0`. Ansible does not run natively on Windows, so use WSL2 with **Ubuntu 24.04** (Ansible 14 requires Python 3.12+) and Docker Desktop's WSL integration enabled:
 
 ```
 python3 -m venv ~/ansible-venv && ~/ansible-venv/bin/pip install ansible==14.5.0 docker==7.2.0
