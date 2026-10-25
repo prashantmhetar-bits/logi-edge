@@ -43,7 +43,7 @@ jobs:
           for f in \
             dataset_normal.csv dataset_warning.csv dataset_critical.csv \
             data_pipeline/simulator.py data_pipeline/preprocessing.py data_pipeline/training_stats.npy \
-            training/generate_dataset.py training/train_model.py training/convert_ptq.py training/prune_quantise.py \
+            training/dataset_utils.py training/generate_dataset.py training/train_model.py training/convert_ptq.py training/prune_quantise.py \
             inference/Dockerfile inference/inference_service.py inference/requirements.txt
           do
             test -s "$f" || { echo "::error::missing or empty: $f"; exit 1; }
@@ -74,13 +74,11 @@ jobs:
           pip freeze > pip-freeze-train.txt
           python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
 
-      - name: Train M1
+      - name: Train M1 (gates - accuracy > 88%, Critical recall > 95%)
         run: python training/train_model.py 2>&1 | tee m1_train.log
 
-      - name: Check M1 model was saved (accuracy >= 88%)
-        run: |
-          test -s cold_chain_mlp_fp32.keras || { echo "::error::M1 model not saved — validation accuracy below 88%"; exit 1; }
-          ls -la cold_chain_mlp_fp32.keras
+      - name: M1 metrics
+        run: cat metrics_m1.json
 
       - name: Upload M1 artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -88,6 +86,7 @@ jobs:
           name: model-m1-fp32
           path: |
             cold_chain_mlp_fp32.keras
+            metrics_m1.json
             m1_train.log
             pip-freeze-train.txt
           if-no-files-found: error
