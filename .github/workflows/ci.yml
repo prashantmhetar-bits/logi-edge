@@ -14,6 +14,7 @@ concurrency:
 env:
   PYTHON_VERSION: "3.11"
   TRAIN_DEPS: tensorflow==2.21.0 keras==3.15.1 numpy==2.4.6 pandas==3.1.0 scikit-learn==1.9.1
+  PRUNE_DEPS: tensorflow-model-optimization==0.8.1 tf-keras==2.21.0
 
 defaults:
   run:
@@ -141,5 +142,62 @@ jobs:
           path: |
             cold_chain_mlp_ptq_int8.tflite
             m2_convert.log
+          if-no-files-found: error
+          retention-days: 14
+
+  prune-m3:
+    name: Prune + quantise M3
+    needs: sanity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TF_USE_LEGACY_KERAS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install training + pruning dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install $TRAIN_DEPS $PRUNE_DEPS
+
+      - name: Prune and convert to INT8 TFLite
+        run: python training/prune_quantise.py 2>&1 | tee m3_prune.log
+
+      - name: Inspect M3 model
+        run: |
+          test -s cold_chain_mlp_pruned_int8.tflite || { echo "::error::M3 model not produced"; exit 1; }
+          python - <<'PY'
+          import os
+          import numpy as np
+          import tensorflow as tf
+          model = tf.keras.models.load_model("cold_chain_mlp_pruned.keras")
+          for layer in model.layers:
+              if layer.get_weights():
+                  k = layer.get_weights()[0]
+                  print(f"{layer.name:<10} kernel={list(k.shape)} sparsity={np.mean(k == 0):.1%}")
+          path = "cold_chain_mlp_pruned_int8.tflite"
+          interp = tf.lite.Interpreter(model_path=path)
+          interp.allocate_tensors()
+          i = interp.get_input_details()[0]
+          o = interp.get_output_details()[0]
+          print(f"file size : {os.path.getsize(path) / 1024:.1f} KB")
+          print(f"input     : shape={i['shape'].tolist()} dtype={i['dtype'].__name__} quant(scale,zp)={i['quantization']}")
+          print(f"output    : shape={o['shape'].tolist()} dtype={o['dtype'].__name__} quant(scale,zp)={o['quantization']}")
+          PY
+
+      - name: Upload M3 artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: model-m3-pruned-int8
+          path: |
+            cold_chain_mlp_pruned_int8.tflite
+            cold_chain_mlp_pruned.keras
+            m3_prune.log
           if-no-files-found: error
           retention-days: 14
