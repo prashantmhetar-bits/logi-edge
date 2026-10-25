@@ -1,5 +1,4 @@
-numpy
-pandas
-paho-mqtt
-tensorflow
-scikit-learn
+keras==3.15.1
+numpy==2.4.6
+paho-mqtt==2.1.0
+tensorflow==2.21.0

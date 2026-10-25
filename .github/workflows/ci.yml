@@ -43,15 +43,21 @@ jobs:
           for f in \
             dataset_normal.csv dataset_warning.csv dataset_critical.csv \
             data_pipeline/simulator.py data_pipeline/preprocessing.py data_pipeline/training_stats.npy \
-            training/dataset_utils.py training/generate_dataset.py training/train_model.py training/convert_ptq.py training/prune_quantise.py \
-            inference/Dockerfile inference/inference_service.py inference/requirements.txt
+            training/dataset_utils.py training/model_eval.py training/generate_dataset.py training/train_model.py training/convert_ptq.py training/prune_quantise.py \
+            inference/Dockerfile inference/inference_service.py inference/requirements.txt \
+            monitoring/drift_monitor.py scripts/integration_test.sh tests/test_drift_monitor.py
           do
             test -s "$f" || { echo "::error::missing or empty: $f"; exit 1; }
             echo "ok  $f"
           done
 
       - name: Python syntax check
-        run: python -m compileall -q data_pipeline training inference
+        run: python -m compileall -q data_pipeline training inference monitoring tests
+
+      - name: Unit tests
+        run: |
+          pip install pytest paho-mqtt==2.1.0
+          pytest -q tests
 
   train-m1:
     name: Train M1 (FP32 baseline)
@@ -78,7 +84,7 @@ jobs:
         run: python training/train_model.py 2>&1 | tee m1_train.log
 
       - name: M1 metrics
-        run: cat metrics_m1.json
+        run: cat metrics_m1_fp32.json
 
       - name: Upload M1 artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -86,7 +92,7 @@ jobs:
           name: model-m1-fp32
           path: |
             cold_chain_mlp_fp32.keras
-            metrics_m1.json
+            metrics_m1_fp32.json
             m1_train.log
             pip-freeze-train.txt
           if-no-files-found: error
@@ -116,24 +122,11 @@ jobs:
         with:
           name: model-m1-fp32
 
-      - name: Convert M1 to INT8 TFLite
+      - name: Convert M2 (calibrate on normalised training split, gate on INT8 accuracy)
         run: python training/convert_ptq.py 2>&1 | tee m2_convert.log
 
-      - name: Inspect M2 model
-        run: |
-          test -s cold_chain_mlp_ptq_int8.tflite || { echo "::error::M2 model not produced"; exit 1; }
-          python - <<'PY'
-          import os
-          import tensorflow as tf
-          path = "cold_chain_mlp_ptq_int8.tflite"
-          interp = tf.lite.Interpreter(model_path=path)
-          interp.allocate_tensors()
-          i = interp.get_input_details()[0]
-          o = interp.get_output_details()[0]
-          print(f"file size : {os.path.getsize(path) / 1024:.1f} KB")
-          print(f"input     : shape={i['shape'].tolist()} dtype={i['dtype'].__name__} quant(scale,zp)={i['quantization']}")
-          print(f"output    : shape={o['shape'].tolist()} dtype={o['dtype'].__name__} quant(scale,zp)={o['quantization']}")
-          PY
+      - name: M2 metrics
+        run: cat metrics_m2_ptq_int8.json
 
       - name: Upload M2 artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -141,17 +134,16 @@ jobs:
           name: model-m2-ptq-int8
           path: |
             cold_chain_mlp_ptq_int8.tflite
+            metrics_m2_ptq_int8.json
             m2_convert.log
           if-no-files-found: error
           retention-days: 14
 
   prune-m3:
     name: Prune + quantise M3
-    needs: sanity
+    needs: train-m1
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      TF_USE_LEGACY_KERAS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -166,30 +158,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install $TRAIN_DEPS $PRUNE_DEPS
 
-      - name: Prune and convert to INT8 TFLite
+      - name: Download M1 model
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: model-m1-fp32
+
+      - name: Structured pruning of M1 + INT8 PTQ (gate on INT8 accuracy)
         run: python training/prune_quantise.py 2>&1 | tee m3_prune.log
 
-      - name: Inspect M3 model
-        run: |
-          test -s cold_chain_mlp_pruned_int8.tflite || { echo "::error::M3 model not produced"; exit 1; }
-          python - <<'PY'
-          import os
-          import numpy as np
-          import tensorflow as tf
-          model = tf.keras.models.load_model("cold_chain_mlp_pruned.keras")
-          for layer in model.layers:
-              if layer.get_weights():
-                  k = layer.get_weights()[0]
-                  print(f"{layer.name:<10} kernel={list(k.shape)} sparsity={np.mean(k == 0):.1%}")
-          path = "cold_chain_mlp_pruned_int8.tflite"
-          interp = tf.lite.Interpreter(model_path=path)
-          interp.allocate_tensors()
-          i = interp.get_input_details()[0]
-          o = interp.get_output_details()[0]
-          print(f"file size : {os.path.getsize(path) / 1024:.1f} KB")
-          print(f"input     : shape={i['shape'].tolist()} dtype={i['dtype'].__name__} quant(scale,zp)={i['quantization']}")
-          print(f"output    : shape={o['shape'].tolist()} dtype={o['dtype'].__name__} quant(scale,zp)={o['quantization']}")
-          PY
+      - name: M3 metrics
+        run: cat metrics_m3_pruned_int8.json
 
       - name: Upload M3 artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -198,28 +176,41 @@ jobs:
           path: |
             cold_chain_mlp_pruned_int8.tflite
             cold_chain_mlp_pruned.keras
+            metrics_m3_pruned_int8.json
             m3_prune.log
           if-no-files-found: error
           retention-days: 14
 
   build-image:
-    name: Build image + MQTT integration test
-    needs: train-m1
+    name: Build image + MQTT integration test (M1, M2, M3)
+    needs: [train-m1, convert-m2, prune-m3]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       TRUCK_ID: truck_001
-      MODEL_PATH: cold_chain_mlp_fp32.keras
       ANOMALY_MODE: combined
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Download M1 model into build context
+      - name: Download M1 model
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: model-m1-fp32
+
+      - name: Download M2 model
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: model-m2-ptq-int8
+
+      - name: Download M3 model
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: model-m3-pruned-int8
+
+      - name: Models in build context
+        run: ls -la cold_chain_mlp_fp32.keras cold_chain_mlp_ptq_int8.tflite cold_chain_mlp_pruned_int8.tflite
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -237,22 +228,15 @@ jobs:
       - name: Image size and layers
         run: |
           docker image ls "$IMAGE_NAME"
-          docker history --no-trunc=false "$IMAGE_NAME:$GITHUB_SHA"
-
-      - name: Model loads inside container
-        run: |
-          docker run --rm --entrypoint python -e MODEL_PATH="$MODEL_PATH" "$IMAGE_NAME:$GITHUB_SHA" -c "
-          import os, tensorflow as tf
-          m = tf.keras.models.load_model(os.environ['MODEL_PATH'])
-          print('loaded', os.environ['MODEL_PATH'], 'params', m.count_params())
-          "
+          docker history "$IMAGE_NAME:$GITHUB_SHA"
+          echo "runs as user: $(docker run --rm --entrypoint id "$IMAGE_NAME:$GITHUB_SHA" -un)"
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install simulator dependencies
-        run: pip install paho-mqtt
+      - name: Install simulator + monitor dependencies
+        run: pip install paho-mqtt==2.1.0
 
       - name: Start Mosquitto broker
         run: |
@@ -261,65 +245,31 @@ jobs:
             -v "$RUNNER_TEMP/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
             eclipse-mosquitto:2
 
-      - name: Start inference container
-        run: |
-          docker run -d --name inference --network host \
-            -e MODEL_PATH="$MODEL_PATH" \
-            -e TRUCK_ID="$TRUCK_ID" \
-            -e MQTT_BROKER=localhost \
-            -e MQTT_PORT=1883 \
-            -e PYTHONUNBUFFERED=1 \
-            "$IMAGE_NAME:$GITHUB_SHA"
-          for i in $(seq 1 120); do
-            if grep -q "Connected successfully" <(docker logs inference 2>&1); then
-              echo "Inference service connected after ${i}s"
-              exit 0
-            fi
-            if [ "$(docker inspect -f '{{.State.Running}}' inference)" != "true" ]; then
-              echo "::error::inference container exited"
-              exit 1
-            fi
-            sleep 1
-          done
-          echo "::error::inference service did not connect to broker within 120s"
-          exit 1
-
       - name: Start simulator
         run: |
           nohup python data_pipeline/simulator.py --anomaly "$ANOMALY_MODE" > "$RUNNER_TEMP/simulator.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/simulator.pid"
 
-      - name: Subscribe to inference topic
-        run: |
-          docker exec mosquitto mosquitto_sub -h localhost \
-            -t "logibridge/trucks/$TRUCK_ID/inference" -C 3 -W 120 \
-            | tee "$RUNNER_TEMP/inference.jsonl"
+      - name: Integration - M1 FP32
+        run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_fp32.keras "$TRUCK_ID"
 
-      - name: Validate inference payloads
-        run: |
-          python - "$RUNNER_TEMP/inference.jsonl" <<'PY'
-          import json, os, sys
-          truck = os.environ["TRUCK_ID"]
-          rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
-          assert rows, "no payloads received"
-          for r in rows:
-              assert {"truck_id", "status", "confidence", "timestamp"} <= set(r), r
-              assert r["truck_id"] == truck, r
-              assert r["status"] in {"NORMAL", "WARNING", "CRITICAL"}, r
-              assert 0.0 <= r["confidence"] <= 1.0, r
-              print(f'{r["status"]:<9} confidence={r["confidence"]:.3f}')
-          print(f"OK: {len(rows)} valid payloads on logibridge/trucks/{truck}/inference")
-          PY
+      - name: Integration - M2 PTQ INT8 (same image, MODEL_PATH switch)
+        run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_ptq_int8.tflite "$TRUCK_ID"
+
+      - name: Integration - M3 pruned INT8 (same image, MODEL_PATH switch)
+        run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_pruned_int8.tflite "$TRUCK_ID"
 
       - name: Dump logs
         if: always()
         run: |
-          echo "::group::inference container"; docker logs inference 2>&1 | tail -n 100 || true; echo "::endgroup::"
-          echo "::group::simulator"; tail -n 50 "$RUNNER_TEMP/simulator.log" || true; echo "::endgroup::"
-          echo "::group::mosquitto"; docker logs mosquitto 2>&1 | tail -n 50 || true; echo "::endgroup::"
+          for f in "$RUNNER_TEMP"/it-*/container.log; do
+            if [ -f "$f" ]; then echo "::group::$f"; tail -n 60 "$f"; echo "::endgroup::"; fi
+          done
+          echo "::group::simulator"; tail -n 30 "$RUNNER_TEMP/simulator.log" || true; echo "::endgroup::"
+          echo "::group::mosquitto"; docker logs mosquitto 2>&1 | tail -n 30 || true; echo "::endgroup::"
 
       - name: Cleanup
         if: always()
         run: |
           kill "$(cat "$RUNNER_TEMP/simulator.pid" 2>/dev/null)" 2>/dev/null || true
-          docker rm -f inference mosquitto 2>/dev/null || true
+          docker rm -f mosquitto 2>/dev/null || true

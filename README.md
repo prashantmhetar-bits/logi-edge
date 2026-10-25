@@ -33,30 +33,30 @@ Generate the synthetic sensor data streams representing Normal, Warning, and Cri
 * **Variant M1 — FP32 Baseline Training:**
   Train the 2-hidden-layer MLP (32 and 16 units, ReLU activation) and verify it exceeds the 88% validation accuracy threshold:
 
-  ```
+```
   .\.venv\Scripts\python.exe training\train_model.py
   
-  ```
+```
 
   *Output:* `cold_chain_mlp_fp32.keras`
 
 * **Variant M2 — Post-Training Quantization (PTQ INT8):**
   Apply Full INT8 quantization using calibration samples via `tf.lite.TFLiteConverter`:
 
-  ```
+```
   .\.venv\Scripts\python.exe training\convert_ptq.py
   
-  ```
+```
 
   *Output:* `cold_chain_mlp_ptq_int8.tflite`
 
 * **Variant M3 — Structured Pruning + PTQ INT8:**
   Apply 35% structured filter pruning with a PolynomialDecay schedule followed by INT8 PTQ:
 
-  ```
+```
   .\.venv\Scripts\python.exe training\prune_quantise.py
   
-  ```
+```
 
   *Output:* `cold_chain_mlp_pruned_int8.tflite`
 
@@ -65,31 +65,50 @@ Generate the synthetic sensor data streams representing Normal, Warning, and Cri
 * **Ensure Docker Engine is Running:**
   Start Docker Desktop on Windows:
 
-  ```
+```
   Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
   
-  ```
+```
 
   Verify daemon health:
 
-  ```
+```
   docker ps
   
-  ```
+```
 
 * **Build the Edge Container Image:**
-  From the project root directory, run the build command targeting the inference Dockerfile:
+  The image ships all three variants (`cold_chain_mlp_fp32.keras`, `cold_chain_mlp_ptq_int8.tflite`, `cold_chain_mlp_pruned_int8.tflite`), so run steps 3 (M1, M2, M3) first. From the project root directory, run the build command targeting the inference Dockerfile:
 
-  ```
+```
   docker build -f inference/Dockerfile -t logi-edge:v1 .
   
-  ```
+```
 
 * **Run the Container (with Environment-Based Model Switching):**
   Execute the container dynamically switching model variants without a rebuild:
 
-  ```
+```
   docker run -e MODEL_PATH=cold_chain_mlp_ptq_int8.tflite -e TRUCK_ID=truck_001 logi-edge:v1
   
-  ```
+```
 
+### 5. PSI Drift Monitoring (Task E1)
+
+Monitors the distribution of the model's P(Normal) output (published as `probabilities[0]` on `logibridge/trucks/{truck_id}/inference`) with a 4-bin PSI.
+
+Build the reference from 300 clean inferences (simulator running with `--anomaly none`, ~50 min):
+
+```
+.\.venv\Scripts\python.exe monitoring\drift_monitor.py --mode reference
+```
+
+Monitor the last 100 inferences, PSI printed every 60 s, `[LOGIBRIDGE DRIFT ALERT]` when PSI > 0.25:
+
+```
+.\.venv\Scripts\python.exe monitoring\drift_monitor.py --mode monitor --log monitoring\psi_log.csv
+```
+
+### 6. CI
+
+`.github/workflows/ci.yml` runs on every push: sanity + unit tests → M1 training (gates: val accuracy > 88%, Critical recall > 95%) → M2 / M3 conversion (gated on INT8 accuracy) → image build → MQTT integration test of all three variants from the same image via `MODEL_PATH`.

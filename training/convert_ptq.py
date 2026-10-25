@@ -1,34 +1,48 @@
-import tensorflow as tf
+"""M2 — Post-Training Quantisation, full INT8.
+
+Calibrates on >= 200 shuffled, normalised TRAINING samples (same normalisation as
+the inference service), then evaluates the INT8 model on the shared validation split.
+Exit code 1 if the INT8 model fails the quality gates.
+"""
+import json
+import sys
+
+import keras
 import numpy as np
-import pandas as pd
 
-# Load validation data for calibration representative dataset
-dataframes = [pd.read_csv(f, header=None) for f in ["dataset_normal.csv", "dataset_warning.csv", "dataset_critical.csv"]]
-df = pd.concat(dataframes, ignore_index=True)
-X = df.iloc[:, :-1].values.astype(np.float32)
+from dataset_utils import REPO_ROOT, load_splits
+from model_eval import Int8Classifier, calibration_samples, convert_full_int8, evaluate
 
-# Load trained FP32 Keras model
-model = tf.keras.models.load_model("cold_chain_mlp_fp32.keras")
+M1_PATH = REPO_ROOT / "cold_chain_mlp_fp32.keras"
+M2_PATH = REPO_ROOT / "cold_chain_mlp_ptq_int8.tflite"
 
-# Define representative dataset generator (>= 200 calibration samples)
-def representative_dataset_gen():
-    for i in range(min(250, len(X))):
-        # Yield a 2D array matching input tensor shape
-        yield [X[i:i+1]]
 
-# Configure TFLite Converter for Full INT8 PTQ
-converter = tf.lite.TFLiteConverter.from_keras_model(model)
-converter.optimizations = [tf.lite.Optimize.DEFAULT]
-converter.representative_dataset = representative_dataset_gen
+def main():
+    X_train, X_val, y_train, y_val = load_splits()
+    model = keras.models.load_model(M1_PATH)
 
-# Enforce strict INT8 for input/output and internal tensors
-converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-converter.inference_input_type = tf.int8
-converter.inference_output_type = tf.int8
+    X_calib = calibration_samples(X_train)
+    convert_full_int8(model, X_calib, M2_PATH)
 
-tflite_quant_model = converter.convert()
+    clf = Int8Classifier(M2_PATH)
+    details = clf.describe(M2_PATH)
+    print(json.dumps(details, indent=2))
 
-with open("cold_chain_mlp_ptq_int8.tflite", "wb") as f:
-    f.write(tflite_quant_model)
+    fp32_pred = np.argmax(model.predict(X_val, verbose=0), axis=1)
+    int8_pred = np.argmax(clf.predict_proba(X_val), axis=1)
+    agreement = float(np.mean(fp32_pred == int8_pred))
+    print(f"FP32 vs INT8 prediction agreement on validation: {agreement:.2%}")
 
-print("✓ M2 PTQ INT8 TFLite model successfully generated and saved!")
+    _, passed = evaluate("M2_PTQ_INT8", y_val, int8_pred, extra={
+        "n_calibration": int(len(X_calib)),
+        "fp32_int8_agreement": agreement,
+        **details,
+    })
+    if not passed:
+        return 1
+    print(f"PASSED quality gates. Saved {M2_PATH.name}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
