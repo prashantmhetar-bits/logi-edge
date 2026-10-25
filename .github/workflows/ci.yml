@@ -1,0 +1,42 @@
+name: logi-edge-ci
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanity:
+    name: Repo sanity check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+
+      - name: Show repository layout
+        run: find . -path ./.git -prune -o -type f -print | sort
+
+      - name: Verify required files exist
+        run: |
+          for f in \
+            dataset_normal.csv dataset_warning.csv dataset_critical.csv \
+            data_pipeline/simulator.py data_pipeline/preprocessing.py data_pipeline/training_stats.npy \
+            training/generate_dataset.py training/train_model.py training/convert_ptq.py training/prune_quantise.py \
+            inference/Dockerfile inference/inference_service.py inference/requirements.txt
+          do
+            test -s "$f" || { echo "::error::missing or empty: $f"; exit 1; }
+            echo "ok  $f"
+          done
+
+      - name: Python syntax check
+        run: python -m compileall -q data_pipeline training inference
