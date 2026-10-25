@@ -11,6 +11,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHON_VERSION: "3.11"
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
   sanity:
     name: Repo sanity check
@@ -18,10 +25,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Show repository layout
         run: find . -path ./.git -prune -o -type f -print | sort
@@ -40,3 +49,43 @@ jobs:
 
       - name: Python syntax check
         run: python -m compileall -q data_pipeline training inference
+
+  train-m1:
+    name: Train M1 (FP32 baseline)
+    needs: sanity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install tensorflow pandas numpy scikit-learn
+          pip freeze > pip-freeze-train.txt
+          python -c "import tensorflow as tf; print('TensorFlow', tf.__version__)"
+
+      - name: Train M1
+        run: python training/train_model.py 2>&1 | tee m1_train.log
+
+      - name: Check M1 model was saved (accuracy >= 88%)
+        run: |
+          test -s cold_chain_mlp_fp32.keras || { echo "::error::M1 model not saved — validation accuracy below 88%"; exit 1; }
+          ls -la cold_chain_mlp_fp32.keras
+
+      - name: Upload M1 artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: model-m1-fp32
+          path: |
+            cold_chain_mlp_fp32.keras
+            m1_train.log
+            pip-freeze-train.txt
+          if-no-files-found: error
+          retention-days: 14
