@@ -204,10 +204,14 @@ jobs:
           retention-days: 14
 
   build-image:
-    name: Build inference image
+    name: Build image + MQTT integration test
     needs: train-m1
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      TRUCK_ID: truck_001
+      MODEL_PATH: cold_chain_mlp_fp32.keras
+      ANOMALY_MODE: combined
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -238,8 +242,85 @@ jobs:
 
       - name: Model loads inside container
         run: |
-          docker run --rm --entrypoint python "$IMAGE_NAME:$GITHUB_SHA" -c "
+          docker run --rm --entrypoint python -e MODEL_PATH="$MODEL_PATH" "$IMAGE_NAME:$GITHUB_SHA" -c "
           import os, tensorflow as tf
           m = tf.keras.models.load_model(os.environ['MODEL_PATH'])
           print('loaded', os.environ['MODEL_PATH'], 'params', m.count_params())
           "
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install simulator dependencies
+        run: pip install paho-mqtt
+
+      - name: Start Mosquitto broker
+        run: |
+          printf 'listener 1883\nallow_anonymous true\n' > "$RUNNER_TEMP/mosquitto.conf"
+          docker run -d --name mosquitto -p 1883:1883 \
+            -v "$RUNNER_TEMP/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
+            eclipse-mosquitto:2
+
+      - name: Start inference container
+        run: |
+          docker run -d --name inference --network host \
+            -e MODEL_PATH="$MODEL_PATH" \
+            -e TRUCK_ID="$TRUCK_ID" \
+            -e MQTT_BROKER=localhost \
+            -e MQTT_PORT=1883 \
+            -e PYTHONUNBUFFERED=1 \
+            "$IMAGE_NAME:$GITHUB_SHA"
+          for i in $(seq 1 120); do
+            if grep -q "Connected successfully" <(docker logs inference 2>&1); then
+              echo "Inference service connected after ${i}s"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' inference)" != "true" ]; then
+              echo "::error::inference container exited"
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::inference service did not connect to broker within 120s"
+          exit 1
+
+      - name: Start simulator
+        run: |
+          nohup python data_pipeline/simulator.py --anomaly "$ANOMALY_MODE" > "$RUNNER_TEMP/simulator.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/simulator.pid"
+
+      - name: Subscribe to inference topic
+        run: |
+          docker exec mosquitto mosquitto_sub -h localhost \
+            -t "logibridge/trucks/$TRUCK_ID/inference" -C 3 -W 120 \
+            | tee "$RUNNER_TEMP/inference.jsonl"
+
+      - name: Validate inference payloads
+        run: |
+          python - "$RUNNER_TEMP/inference.jsonl" <<'PY'
+          import json, os, sys
+          truck = os.environ["TRUCK_ID"]
+          rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+          assert rows, "no payloads received"
+          for r in rows:
+              assert {"truck_id", "status", "confidence", "timestamp"} <= set(r), r
+              assert r["truck_id"] == truck, r
+              assert r["status"] in {"NORMAL", "WARNING", "CRITICAL"}, r
+              assert 0.0 <= r["confidence"] <= 1.0, r
+              print(f'{r["status"]:<9} confidence={r["confidence"]:.3f}')
+          print(f"OK: {len(rows)} valid payloads on logibridge/trucks/{truck}/inference")
+          PY
+
+      - name: Dump logs
+        if: always()
+        run: |
+          echo "::group::inference container"; docker logs inference 2>&1 | tail -n 100 || true; echo "::endgroup::"
+          echo "::group::simulator"; tail -n 50 "$RUNNER_TEMP/simulator.log" || true; echo "::endgroup::"
+          echo "::group::mosquitto"; docker logs mosquitto 2>&1 | tail -n 50 || true; echo "::endgroup::"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/simulator.pid" 2>/dev/null)" 2>/dev/null || true
+          docker rm -f inference mosquitto 2>/dev/null || true
