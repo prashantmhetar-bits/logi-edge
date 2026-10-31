@@ -8,11 +8,14 @@ import tensorflow as tf
 import numpy as np
 import os
 
+from temperature_rule import apply_rule
+
 # Configuration from environment variables
 TRUCK_ID = os.environ.get("TRUCK_ID", "truck_001")
-MODEL_PATH = os.environ.get("MODEL_PATH", "cold_chain_mlp_fp32.keras")
+MODEL_PATH = os.environ.get("MODEL_PATH", "cold_chain_mlp_pruned_int8.tflite")  # M3, Task F3
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
+TEMP_SETPOINT_C = float(os.environ.get("TEMP_SETPOINT_C", 4.0))
 
 TOPIC_TELEMETRY = f"truck/sensor/#"
 TOPIC_INFERENCE = f"logibridge/trucks/{TRUCK_ID}/inference"
@@ -30,6 +33,7 @@ print(f"-> MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
 print(f"-> Subscribing to: {TOPIC_TELEMETRY}")
 print(f"-> Publishing to: {TOPIC_INFERENCE}")
 print(f"-> Training statistics: {STATS_PATH}")
+print(f"-> Temperature setpoint: {TEMP_SETPOINT_C} C (rule: >1 C off = WARNING, >3 C off = CRITICAL)")
 print("=" * 50)
 
 if not STATS_PATH.is_file():
@@ -182,14 +186,21 @@ def on_message(client, userdata, msg):
         else:
             output_data = keras_model.predict(normalized_features, verbose=0)
 
-        predicted_class = int(np.argmax(output_data[0]))
+        model_class = int(np.argmax(output_data[0]))
+        temp_mean_c = float(features[0])
+        # The temperature rule can only raise the model's class (Task F3, temperature_rule.py)
+        predicted_class = apply_rule(model_class, temp_mean_c, TEMP_SETPOINT_C)
+        # Model confidence, not the rule's: the drift monitor's PSI tracks the model
         confidence = float(np.max(output_data[0]))
         status_map = {0: "NORMAL", 1: "WARNING", 2: "CRITICAL"}
         status = status_map.get(predicted_class, "UNKNOWN")
+        model_status = status_map.get(model_class, "UNKNOWN")
 
         result_payload = {
             "truck_id": TRUCK_ID,
             "status": status,
+            "model_status": model_status,
+            "temp_mean_c": temp_mean_c,
             "confidence": confidence,
             "probabilities": [float(p) for p in output_data[0]],
             "timestamp": time.time(),
@@ -197,7 +208,7 @@ def on_message(client, userdata, msg):
         client.publish(TOPIC_INFERENCE, json.dumps(result_payload))
         print(
             f"[Publish Success] Sent result -> Status: {status} "
-            f"(Confidence: {confidence:.2f})"
+            f"(Model: {model_status}, Confidence: {confidence:.2f}, Temp mean: {temp_mean_c:.2f} C)"
         )
     except Exception as e:
         print(f"[Error] Failed to process incoming message: {e}")

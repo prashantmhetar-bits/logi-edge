@@ -1,0 +1,63 @@
+{
+  "variant": "M3_PRUNED_INT8",
+  "tensorflow": "2.21.0",
+  "n_val": 59,
+  "val_accuracy": 1.0,
+  "recall_per_class": {
+    "Normal (0)": 1.0,
+    "Warning (1)": 1.0,
+    "Critical (2)": 1.0
+  },
+  "critical_recall": 1.0,
+  "confusion_matrix": [
+    [
+      24,
+      0,
+      0
+    ],
+    [
+      0,
+      18,
+      0
+    ],
+    [
+      0,
+      0,
+      17
+    ]
+  ],
+  "gates": {
+    "min_val_accuracy": 0.88,
+    "min_critical_recall": 0.95
+  },
+  "n_calibration": 235,
+  "fp32_int8_agreement": 1.0,
+  "structure": {
+    "hidden_units_before": [
+      32,
+      16
+    ],
+    "hidden_units_after": [
+      21,
+      10
+    ],
+    "neurons_removed_fraction": 0.35416666666666663,
+    "params_before": 803,
+    "params_after": 400,
+    "masked_vs_compact_max_abs_diff": 1.1920928955078125e-07
+  },
+  "file_size_kb": 3.75,
+  "input_quantization": {
+    "scale": 0.049729231745004654,
+    "zero_point": -74,
+    "representable_range": [
+      -2.685,
+      9.996
+    ]
+  },
+  "output_quantization": {
+    "scale": 0.00390625,
+    "zero_point": -128
+  },
+  "passed": true
+}

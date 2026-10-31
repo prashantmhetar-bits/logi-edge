@@ -74,7 +74,7 @@ Power remains important, but electrical power is available from the truck's onbo
 |------------------------|---------|
 | INT8 Quantization | Reduces computational workload and model size |
 | Structured Pruning | Removes less important parameters to reduce FLOPs |
-| Hailo NPU Acceleration | Offloads inference from CPU to dedicated AI accelerator |
+| Hailo NPU Acceleration | Offloads inference from CPU to dedicated AI accelerator (for a model of the size given above; the trained LogiEdge MLP runs on the CPU, see the note below) |
 | TensorFlow Lite Optimization | Enables efficient edge-device execution |
 
 # Expected Benefits
@@ -95,3 +95,5 @@ Power remains important, but electrical power is available from the truck's onbo
 | Classification | Compute-Bound |
 | Recommended Deployment Optimizations | INT8 Quantization, Structured Pruning, Hailo NPU Acceleration, TensorFlow Lite Optimization |
 | Expected Outcome | Reduced latency, smaller model size, and lower power consumption while meeting LogiEdge real-time inference requirements |
+
+> **Note: the trained model vs the B2 figures** (see Task F3, `deployment/deployment_recommendation.md` §3). The 45 MFLOPs and 18 MB above are the figures the brief gives. The trained LogiEdge MLP is far smaller. M1 needs about 1.5 kFLOPs per inference (6×32 + 32×16 + 16×3 = 752 multiply-adds), and M3 about 0.7 kFLOPs (366 multiply-adds), with M3's weights and activations taking 0.53 KB. INT8 quantisation and structured pruning are applied as M2 and M3. Hailo NPU acceleration is kept for future, heavier models. The Hailo-8L only runs models compiled to `.hef`, not `.tflite`, and M3 already runs in about 0.02 ms on the benchmark laptop (about 0.2 ms estimated on the Pi 5), so M3 runs on the Pi 5's Cortex-A76 CPU.

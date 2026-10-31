@@ -6,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, recall_score
 
-from dataset_utils import CLASS_NAMES, REPO_ROOT, SEED
+from dataset_utils import CLASS_NAMES, RESULTS_DIR, SEED
 
 MIN_VAL_ACCURACY = 0.88
 MIN_CRITICAL_RECALL = 0.95
@@ -48,7 +48,8 @@ def evaluate(variant, y_true, y_pred, extra=None):
     if failures:
         print(f"[{variant}] FAILED quality gate: {', '.join(failures)}")
 
-    (REPO_ROOT / f"metrics_{variant.lower()}.json").write_text(json.dumps(metrics, indent=2))
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    (RESULTS_DIR / f"metrics_{variant.lower()}.json").write_text(json.dumps(metrics, indent=2))
     return metrics, not failures
 
 
@@ -89,15 +90,15 @@ class Int8Classifier:
         if self.inp["dtype"] != np.int8 or self.out["dtype"] != np.int8:
             raise TypeError(f"{path}: expected int8 input/output, got {self.inp['dtype']}/{self.out['dtype']}")
 
+    def predict_one(self, row):
+        q = np.clip(np.round(row / self.in_scale + self.in_zp), -128, 127).astype(np.int8)
+        self.interpreter.set_tensor(self.inp["index"], q.reshape(self.inp["shape"]))
+        self.interpreter.invoke()
+        raw = self.interpreter.get_tensor(self.out["index"])[0].astype(np.float32)
+        return (raw - self.out_zp) * self.out_scale
+
     def predict_proba(self, X):
-        probs = np.empty((len(X), self.out["shape"][-1]), dtype=np.float32)
-        for i, row in enumerate(X):
-            q = np.clip(np.round(row / self.in_scale + self.in_zp), -128, 127).astype(np.int8)
-            self.interpreter.set_tensor(self.inp["index"], q.reshape(self.inp["shape"]))
-            self.interpreter.invoke()
-            raw = self.interpreter.get_tensor(self.out["index"])[0].astype(np.float32)
-            probs[i] = (raw - self.out_zp) * self.out_scale
-        return probs
+        return np.stack([self.predict_one(row) for row in X])
 
     def describe(self, path):
         lo = (-128 - self.in_zp) * self.in_scale

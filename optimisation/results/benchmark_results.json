@@ -1,0 +1,88 @@
+{
+  "methodology": {
+    "warmup_runs_excluded": 10,
+    "timed_runs": 200,
+    "batch_size": 1,
+    "energy_formula": "E[mJ] = TDP[W] x mean latency[ms] (Lab 2 Step 3; process CPU % reported, not multiplied in)",
+    "cpu_window_sec": 3.0,
+    "tdp_w": 15.0
+  },
+  "environment": {
+    "platform": "Windows-11-10.0.22631-SP0",
+    "processor": "Intel64 Family 6 Model 154 Stepping 4, GenuineIntel",
+    "logical_cpus": 12,
+    "on_ac_power": true,
+    "python": "3.13.5",
+    "tensorflow": "2.21.0",
+    "keras": "3.15.1"
+  },
+  "n_val": 59,
+  "results": {
+    "M1_FP32": {
+      "model_file": "cold_chain_mlp_fp32.keras",
+      "mean_latency_ms": 2.260550500359386,
+      "p95_latency_ms": 3.442505002021789,
+      "median_latency_ms": 2.062349987681955,
+      "max_latency_ms": 3.838100004941225,
+      "file_size_kb": 34.4638671875,
+      "val_accuracy": 1.0,
+      "recall_per_class": {
+        "Normal (0)": 1.0,
+        "Warning (1)": 1.0,
+        "Critical (2)": 1.0
+      },
+      "critical_recall": 1.0,
+      "critical_detected": "17/17",
+      "process_cpu_percent": 6.8,
+      "system_cpu_percent": 2.7,
+      "power_w": 15.0,
+      "energy_mj": 33.90825750539079,
+      "model_ram_kb": 3.359375,
+      "keras_predict_api_mean_ms": 63.90245900140144,
+      "keras_predict_api_p95_ms": 73.5562400019262,
+      "savedmodel_size_kb": 51.431640625
+    },
+    "M2_PTQ_INT8": {
+      "model_file": "cold_chain_mlp_ptq_int8.tflite",
+      "mean_latency_ms": 0.014493000926449895,
+      "p95_latency_ms": 0.014899997040629387,
+      "median_latency_ms": 0.014499993994832039,
+      "max_latency_ms": 0.015700003132224083,
+      "file_size_kb": 4.578125,
+      "val_accuracy": 1.0,
+      "recall_per_class": {
+        "Normal (0)": 1.0,
+        "Warning (1)": 1.0,
+        "Critical (2)": 1.0
+      },
+      "critical_recall": 1.0,
+      "critical_detected": "17/17",
+      "process_cpu_percent": 7.8,
+      "system_cpu_percent": 9.2,
+      "power_w": 15.0,
+      "energy_mj": 0.21739501389674842,
+      "model_ram_kb": 0.9921875
+    },
+    "M3_PRUNED_INT8": {
+      "model_file": "cold_chain_mlp_pruned_int8.tflite",
+      "mean_latency_ms": 0.02003599947784096,
+      "p95_latency_ms": 0.035910034785047174,
+      "median_latency_ms": 0.01425005029886961,
+      "max_latency_ms": 0.041199964471161366,
+      "file_size_kb": 3.75,
+      "val_accuracy": 1.0,
+      "recall_per_class": {
+        "Normal (0)": 1.0,
+        "Warning (1)": 1.0,
+        "Critical (2)": 1.0
+      },
+      "critical_recall": 1.0,
+      "critical_detected": "17/17",
+      "process_cpu_percent": 5.2,
+      "system_cpu_percent": 4.1,
+      "power_w": 15.0,
+      "energy_mj": 0.3005399921676144,
+      "model_ram_kb": 0.5322265625
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "variant": "M1_FP32",
+  "tensorflow": "2.21.0",
+  "n_val": 59,
+  "val_accuracy": 1.0,
+  "recall_per_class": {
+    "Normal (0)": 1.0,
+    "Warning (1)": 1.0,
+    "Critical (2)": 1.0
+  },
+  "critical_recall": 1.0,
+  "confusion_matrix": [
+    [
+      24,
+      0,
+      0
+    ],
+    [
+      0,
+      18,
+      0
+    ],
+    [
+      0,
+      0,
+      17
+    ]
+  ],
+  "gates": {
+    "min_val_accuracy": 0.88,
+    "min_critical_recall": 0.95
+  },
+  "n_train": 235,
+  "params": 803,
+  "passed": true
+}

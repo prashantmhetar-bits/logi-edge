@@ -45,8 +45,11 @@ jobs:
             dataset_normal.csv dataset_warning.csv dataset_critical.csv \
             data_pipeline/simulator.py data_pipeline/preprocessing.py data_pipeline/training_stats.npy \
             training/dataset_utils.py training/model_eval.py training/generate_dataset.py training/train_model.py training/convert_ptq.py training/prune_quantise.py \
-            inference/Dockerfile inference/inference_service.py inference/requirements.txt \
-            monitoring/drift_monitor.py scripts/integration_test.sh tests/test_drift_monitor.py \
+            optimisation/benchmark.py optimisation/pareto.py \
+            optimisation/results/benchmark_results.json optimisation/results/benchmark_results.csv optimisation/results/pareto_chart.png \
+            deployment/deployment_recommendation.md \
+            inference/Dockerfile inference/inference_service.py inference/temperature_rule.py inference/requirements.txt \
+            monitoring/drift_monitor.py scripts/integration_test.sh tests/test_drift_monitor.py tests/test_temperature_rule.py \
             deployment/logibridge_deploy.yml deployment/inventory.ini
           do
             test -s "$f" || { echo "::error::missing or empty: $f"; exit 1; }
@@ -54,7 +57,7 @@ jobs:
           done
 
       - name: Python syntax check
-        run: python -m compileall -q data_pipeline training inference monitoring tests
+        run: python -m compileall -q data_pipeline training optimisation inference monitoring tests
 
       - name: Unit tests
         run: |
@@ -86,15 +89,15 @@ jobs:
         run: python training/train_model.py 2>&1 | tee m1_train.log
 
       - name: M1 metrics
-        run: cat metrics_m1_fp32.json
+        run: cat optimisation/results/metrics_m1_fp32.json
 
       - name: Upload M1 artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: model-m1-fp32
           path: |
-            cold_chain_mlp_fp32.keras
-            metrics_m1_fp32.json
+            training/models/cold_chain_mlp_fp32.keras
+            optimisation/results/metrics_m1_fp32.json
             m1_train.log
             pip-freeze-train.txt
           if-no-files-found: error
@@ -128,15 +131,15 @@ jobs:
         run: python training/convert_ptq.py 2>&1 | tee m2_convert.log
 
       - name: M2 metrics
-        run: cat metrics_m2_ptq_int8.json
+        run: cat optimisation/results/metrics_m2_ptq_int8.json
 
       - name: Upload M2 artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: model-m2-ptq-int8
           path: |
-            cold_chain_mlp_ptq_int8.tflite
-            metrics_m2_ptq_int8.json
+            training/models/cold_chain_mlp_ptq_int8.tflite
+            optimisation/results/metrics_m2_ptq_int8.json
             m2_convert.log
           if-no-files-found: error
           retention-days: 14
@@ -169,16 +172,16 @@ jobs:
         run: python training/prune_quantise.py 2>&1 | tee m3_prune.log
 
       - name: M3 metrics
-        run: cat metrics_m3_pruned_int8.json
+        run: cat optimisation/results/metrics_m3_pruned_int8.json
 
       - name: Upload M3 artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: model-m3-pruned-int8
           path: |
-            cold_chain_mlp_pruned_int8.tflite
-            cold_chain_mlp_pruned.keras
-            metrics_m3_pruned_int8.json
+            training/models/cold_chain_mlp_pruned_int8.tflite
+            training/models/cold_chain_mlp_pruned.keras
+            optimisation/results/metrics_m3_pruned_int8.json
             m3_prune.log
           if-no-files-found: error
           retention-days: 14
@@ -212,7 +215,7 @@ jobs:
           name: model-m3-pruned-int8
 
       - name: Models in build context
-        run: ls -la cold_chain_mlp_fp32.keras cold_chain_mlp_ptq_int8.tflite cold_chain_mlp_pruned_int8.tflite
+        run: ls -la training/models/cold_chain_mlp_fp32.keras training/models/cold_chain_mlp_ptq_int8.tflite training/models/cold_chain_mlp_pruned_int8.tflite
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -287,7 +290,7 @@ jobs:
           ANSIBLE_LOCALHOST_WARNING: "False"
         run: |
           export PATH="$RUNNER_TEMP/ansible-venv/bin:$PATH"
-          ref="$RUNNER_TEMP/it-cold_chain_mlp_ptq_int8/reference_dist.json"
+          ref="$RUNNER_TEMP/it-cold_chain_mlp_pruned_int8/reference_dist.json"
           for run in 1 2; do
             echo "=== ansible-playbook run $run ==="
             ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml \

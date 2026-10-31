@@ -10,7 +10,8 @@
   gather_facts: false
   vars:
     logibridge_dir: /opt/logibridge
-    model_src: "{{ playbook_dir }}/../cold_chain_mlp_ptq_int8.tflite"
+    # M3 per Task F3; roll back to M2 with -e model_src=<path to cold_chain_mlp_ptq_int8.tflite>
+    model_src: "{{ playbook_dir }}/../training/models/cold_chain_mlp_pruned_int8.tflite"
     reference_src: "{{ playbook_dir }}/../monitoring/reference_dist.json"
     registry: localhost:5000
     image_name: "{{ registry }}/logi-edge"

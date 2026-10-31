@@ -1,0 +1,4 @@
+variant,model_file,mean_latency_ms,p95_latency_ms,file_size_kb,accuracy_pct,energy_mj,critical_recall_pct,pareto_optimal,savedmodel_size_kb
+M1_FP32,cold_chain_mlp_fp32.keras,2.2606,3.4425,34.46,100.00,33.90826,100.00,no,51.43
+M2_PTQ_INT8,cold_chain_mlp_ptq_int8.tflite,0.0145,0.0149,4.58,100.00,0.21740,100.00,yes,
+M3_PRUNED_INT8,cold_chain_mlp_pruned_int8.tflite,0.0200,0.0359,3.75,100.00,0.30054,100.00,yes,

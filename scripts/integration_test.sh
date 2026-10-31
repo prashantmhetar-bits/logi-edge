@@ -52,19 +52,25 @@ docker exec mosquitto mosquitto_sub -h localhost \
 
 python - "$OUT/payloads.jsonl" "$TRUCK_ID" <<'PY'
 import json, sys
+sys.path.insert(0, "inference")
+from temperature_rule import apply_rule
+STATUSES = ["NORMAL", "WARNING", "CRITICAL"]
 rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 assert rows, "no payloads received"
 for r in rows:
-    assert {"truck_id", "status", "confidence", "probabilities", "timestamp"} <= set(r), r
+    assert {"truck_id", "status", "model_status", "temp_mean_c", "confidence", "probabilities", "timestamp"} <= set(r), r
     assert r["truck_id"] == sys.argv[2], r
-    assert r["status"] in {"NORMAL", "WARNING", "CRITICAL"}, r
+    assert r["status"] in STATUSES, r
     p = r["probabilities"]
     assert isinstance(p, list) and len(p) == 3, r
     assert all(0.0 <= x <= 1.0 for x in p), r
     assert abs(sum(p) - 1.0) < 0.02, f"probabilities do not sum to 1: {r}"   # INT8 output step = 1/256
     assert abs(max(p) - r["confidence"]) < 1e-6, r
-    assert r["status"] == ["NORMAL", "WARNING", "CRITICAL"][p.index(max(p))], r
-    print(f'{r["status"]:<9} confidence={r["confidence"]:.3f}  P(Normal)={p[0]:.3f}')
+    assert r["model_status"] == STATUSES[p.index(max(p))], r
+    # status = model class raised by the temperature rule (container default setpoint 4.0 C)
+    assert r["status"] == STATUSES[apply_rule(p.index(max(p)), r["temp_mean_c"], 4.0)], r
+    print(f'{r["status"]:<9} model={r["model_status"]:<9} confidence={r["confidence"]:.3f}  '
+          f'P(Normal)={p[0]:.3f}  temp_mean={r["temp_mean_c"]:.2f} C')
 print(f"OK: {len(rows)} valid payloads")
 PY
 

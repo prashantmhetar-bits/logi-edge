@@ -12,6 +12,8 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+MODELS_DIR = REPO_ROOT / "training" / "models"
+RESULTS_DIR = REPO_ROOT / "optimisation" / "results"
 STATS_PATH = REPO_ROOT / "data_pipeline" / "training_stats.npy"
 DATASET_FILES = {
     0: REPO_ROOT / "dataset_normal.csv",
