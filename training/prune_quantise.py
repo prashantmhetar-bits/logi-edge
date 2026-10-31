@@ -17,12 +17,12 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_model_optimization as tfmot  # used for its PolynomialDecay schedule only
 
-from dataset_utils import REPO_ROOT, SEED, load_splits
+from dataset_utils import MODELS_DIR, SEED, load_splits
 from model_eval import Int8Classifier, calibration_samples, convert_full_int8, evaluate
 
-M1_PATH = REPO_ROOT / "cold_chain_mlp_fp32.keras"
-M3_KERAS_PATH = REPO_ROOT / "cold_chain_mlp_pruned.keras"
-M3_TFLITE_PATH = REPO_ROOT / "cold_chain_mlp_pruned_int8.tflite"
+M1_PATH = MODELS_DIR / "cold_chain_mlp_fp32.keras"
+M3_KERAS_PATH = MODELS_DIR / "cold_chain_mlp_pruned.keras"
+M3_TFLITE_PATH = MODELS_DIR / "cold_chain_mlp_pruned_int8.tflite"
 
 FINAL_SPARSITY = 0.35
 EPOCHS = 15

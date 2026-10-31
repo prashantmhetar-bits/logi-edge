@@ -10,12 +10,13 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from dataset_utils import REPO_ROOT, SEED, load_splits
+from dataset_utils import MODELS_DIR, SEED, load_splits
 from model_eval import evaluate
 
 EPOCHS = 10
 BATCH_SIZE = 16
-MODEL_PATH = REPO_ROOT / "cold_chain_mlp_fp32.keras"
+MODEL_PATH = MODELS_DIR / "cold_chain_mlp_fp32.keras"
+SAVEDMODEL_DIR = MODELS_DIR / "cold_chain_mlp_fp32_savedmodel"
 
 
 def build_model():
@@ -48,8 +49,10 @@ def main():
         print("Model NOT saved.", file=sys.stderr)
         return 1
 
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
     model.save(MODEL_PATH)
-    print(f"PASSED quality gates. Saved {MODEL_PATH.name}")
+    model.export(SAVEDMODEL_DIR, verbose=False)
+    print(f"PASSED quality gates. Saved {MODEL_PATH.name} and TF SavedModel {SAVEDMODEL_DIR.name}/")
     return 0
 
 

@@ -10,11 +10,11 @@ import sys
 import keras
 import numpy as np
 
-from dataset_utils import REPO_ROOT, load_splits
+from dataset_utils import MODELS_DIR, load_splits
 from model_eval import Int8Classifier, calibration_samples, convert_full_int8, evaluate
 
-M1_PATH = REPO_ROOT / "cold_chain_mlp_fp32.keras"
-M2_PATH = REPO_ROOT / "cold_chain_mlp_ptq_int8.tflite"
+M1_PATH = MODELS_DIR / "cold_chain_mlp_fp32.keras"
+M2_PATH = MODELS_DIR / "cold_chain_mlp_ptq_int8.tflite"
 
 
 def main():
