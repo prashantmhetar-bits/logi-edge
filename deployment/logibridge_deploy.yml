@@ -1,16 +1,10 @@
 ---
-# LogiBridge edge deployment (Task E2) - exactly 7 tasks, idempotent:
-# a second run with no changes reports changed=0.
-#
-# Run from the repository root:
-#   ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml
 - name: Deploy LogiBridge inference container to the truck edge node
   hosts: edge_nodes
   become: true
   gather_facts: false
   vars:
     logibridge_dir: /opt/logibridge
-    # M3 per Task F3; roll back to M2 with -e model_src=<path to cold_chain_mlp_ptq_int8.tflite>
     model_src: "{{ playbook_dir }}/../training/models/cold_chain_mlp_pruned_int8.tflite"
     reference_src: "{{ playbook_dir }}/../monitoring/reference_dist.json"
     registry: localhost:5000
@@ -48,8 +42,6 @@
         mode: "0644"
       register: reference_copy
 
-    # Only when the model or reference changed: the container reads them at start-up,
-    # so it must be restarted to pick them up. Otherwise skipped (keeps changed=0).
     - name: "4/7 Stop running inference container (only if model/reference changed)"
       ansible.builtin.shell: |
         set -o pipefail
@@ -63,7 +55,6 @@
       changed_when: "'stopped' in stop_result.stdout"
       when: model_copy.changed or reference_copy.changed
 
-    # force_source re-checks the registry every run; reports changed only if the image ID changed.
     - name: "5/7 Pull updated container image from local registry"
       community.docker.docker_image:
         name: "{{ image_name }}"
@@ -72,7 +63,6 @@
         force_source: true
       tags: [pull]
 
-    # Recreates only if image or configuration differs; starts the container if it was stopped.
     - name: "6/7 Start inference container with environment variables"
       community.docker.docker_container:
         name: "{{ container_name }}"
@@ -85,6 +75,9 @@
             source: "{{ logibridge_dir }}"
             target: "{{ logibridge_dir }}"
             read_only: true
+          - type: volume
+            source: logibridge-alerts
+            target: /var/lib/logibridge
         env:
           MODEL_PATH: "{{ logibridge_dir }}/model.tflite"
           TRUCK_ID: "{{ truck_id }}"
