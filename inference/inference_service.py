@@ -1,4 +1,6 @@
 import json
+import signal
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -8,17 +10,23 @@ import tensorflow as tf
 import numpy as np
 import os
 
+from alerting import AlertLog, AlertTracker
 from temperature_rule import apply_rule
 
-# Configuration from environment variables
 TRUCK_ID = os.environ.get("TRUCK_ID", "truck_001")
-MODEL_PATH = os.environ.get("MODEL_PATH", "cold_chain_mlp_pruned_int8.tflite")  # M3, Task F3
+MODEL_PATH = os.environ.get("MODEL_PATH", "cold_chain_mlp_pruned_int8.tflite")
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", 1883))
 TEMP_SETPOINT_C = float(os.environ.get("TEMP_SETPOINT_C", 4.0))
+ALERT_LOG_PATH = os.environ.get("ALERT_LOG_PATH", "/var/lib/logibridge/alerts.jsonl")
 
-TOPIC_TELEMETRY = f"truck/sensor/#"
+TOPIC_TELEMETRY = "truck/sensor/#"
 TOPIC_INFERENCE = f"logibridge/trucks/{TRUCK_ID}/inference"
+TOPIC_ALERTS = f"logibridge/trucks/{TRUCK_ID}/alerts"
+TOPIC_STATUS = f"logibridge/trucks/{TRUCK_ID}/status"
+QOS_INFERENCE = 0
+QOS_ALERTS = 1
+QOS_STATUS = 1
 WINDOW_SIZE_SEC = 30.0
 STEP_SIZE_SEC = 10.0
 
@@ -31,9 +39,14 @@ print(f"-> Target Truck ID: {TRUCK_ID}")
 print(f"-> Target Model File: {MODEL_PATH}")
 print(f"-> MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
 print(f"-> Subscribing to: {TOPIC_TELEMETRY}")
-print(f"-> Publishing to: {TOPIC_INFERENCE}")
+print(
+    f"-> Publishing to: {TOPIC_INFERENCE} (QoS {QOS_INFERENCE}), alerts to {TOPIC_ALERTS} (QoS {QOS_ALERTS})"
+)
+print(f"-> Local alert log: {ALERT_LOG_PATH or 'disabled'}")
 print(f"-> Training statistics: {STATS_PATH}")
-print(f"-> Temperature setpoint: {TEMP_SETPOINT_C} C (rule: >1 C off = WARNING, >3 C off = CRITICAL)")
+print(
+    f"-> Temperature setpoint: {TEMP_SETPOINT_C} C (rule: >1 C off = WARNING, >3 C off = CRITICAL)"
+)
 print("=" * 50)
 
 if not STATS_PATH.is_file():
@@ -69,7 +82,6 @@ temp_window = deque()
 vib_window = deque()
 last_window_eval = time.time()
 
-# Load Model dynamically based on extension (.tflite vs .keras)
 if MODEL_PATH.endswith(".tflite"):
     print(f"-> Loading TFLite Model runtime...")
     interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
@@ -83,15 +95,37 @@ else:
     is_tflite = False
 print("-> Model loaded successfully!")
 
+MODEL_NAME = os.path.basename(MODEL_PATH)
+alert_tracker = AlertTracker(TRUCK_ID, MODEL_NAME)
+alert_log = AlertLog(ALERT_LOG_PATH)
+
+
 def on_connect(client, userdata, flags, reason_code, properties):
     if reason_code == 0:
         print("[MQTT] Connected successfully to MQTT Broker!")
-        client.subscribe(TOPIC_TELEMETRY)
+        client.subscribe(TOPIC_TELEMETRY, qos=1)
+        client.publish(
+            TOPIC_STATUS,
+            json.dumps(
+                {
+                    "truck_id": TRUCK_ID,
+                    "state": "online",
+                    "model": MODEL_NAME,
+                    "timestamp": time.time(),
+                }
+            ),
+            qos=QOS_STATUS,
+            retain=True,
+        )
     else:
         print(f"[MQTT] Failed to connect, return code {reason_code}")
 
+
 def on_connect_fail(client, userdata):
-    print(f"[MQTT] Could not connect to broker at {MQTT_BROKER}:{MQTT_PORT}; retrying...")
+    print(
+        f"[MQTT] Could not connect to broker at {MQTT_BROKER}:{MQTT_PORT}; retrying..."
+    )
+
 
 def extract_features(current_time):
     cutoff = current_time - WINDOW_SIZE_SEC
@@ -132,11 +166,11 @@ def extract_features(current_time):
         dtype=np.float32,
     )
 
+
 def on_message(client, userdata, msg):
     global last_window_eval
     try:
         payload = json.loads(msg.payload.decode())
-        print(f"[Data In] Received telemetry from simulator on topic: {msg.topic}")
 
         value = payload.get("value")
         if value is None:
@@ -168,7 +202,6 @@ def on_message(client, userdata, msg):
         normalized_features = np.clip(
             (features - train_mean) / safe_std, -10.0, 10.0
         ).reshape(1, 6)
-        print(f"[Inference] Running prediction using {MODEL_PATH}...")
         if is_tflite:
             inp, out = input_details[0], output_details[0]
             model_input = normalized_features.astype(np.float32)
@@ -182,20 +215,21 @@ def on_message(client, userdata, msg):
             output_data = interpreter.get_tensor(out["index"])
             if out["dtype"] == np.int8:
                 out_scale, out_zero_point = out["quantization"]
-                output_data = (output_data.astype(np.float32) - out_zero_point) * out_scale
+                output_data = (
+                    output_data.astype(np.float32) - out_zero_point
+                ) * out_scale
         else:
             output_data = keras_model.predict(normalized_features, verbose=0)
 
         model_class = int(np.argmax(output_data[0]))
         temp_mean_c = float(features[0])
-        # The temperature rule can only raise the model's class (Task F3, temperature_rule.py)
         predicted_class = apply_rule(model_class, temp_mean_c, TEMP_SETPOINT_C)
-        # Model confidence, not the rule's: the drift monitor's PSI tracks the model
         confidence = float(np.max(output_data[0]))
         status_map = {0: "NORMAL", 1: "WARNING", 2: "CRITICAL"}
         status = status_map.get(predicted_class, "UNKNOWN")
         model_status = status_map.get(model_class, "UNKNOWN")
 
+        now = time.time()
         result_payload = {
             "truck_id": TRUCK_ID,
             "status": status,
@@ -203,18 +237,42 @@ def on_message(client, userdata, msg):
             "temp_mean_c": temp_mean_c,
             "confidence": confidence,
             "probabilities": [float(p) for p in output_data[0]],
-            "timestamp": time.time(),
+            "model": MODEL_NAME,
+            "timestamp": now,
         }
-        client.publish(TOPIC_INFERENCE, json.dumps(result_payload))
+        client.publish(TOPIC_INFERENCE, json.dumps(result_payload), qos=QOS_INFERENCE)
         print(
-            f"[Publish Success] Sent result -> Status: {status} "
-            f"(Model: {model_status}, Confidence: {confidence:.2f}, Temp mean: {temp_mean_c:.2f} C)"
+            f"[Inference] {status:<8} (model: {model_status}, confidence: {confidence:.2f}, "
+            f"P(Normal): {result_payload['probabilities'][0]:.2f}, temp mean: {temp_mean_c:.2f} C)"
         )
+
+        alert = alert_tracker.update(status, model_status, temp_mean_c, confidence, now)
+        if alert:
+            try:
+                alert_log.append(alert)
+            except OSError as exc:
+                print(
+                    f"[Alert] WARNING: could not write alert log {ALERT_LOG_PATH}: {exc}"
+                )
+            client.publish(TOPIC_ALERTS, json.dumps(alert), qos=QOS_ALERTS)
+            print(
+                f"[Alert] #{alert['seq']} {alert['event']}: {alert['previous_status']} -> {status} "
+                f"(logged + published to {TOPIC_ALERTS})"
+            )
     except Exception as e:
         print(f"[Error] Failed to process incoming message: {e}")
 
-# Setup MQTT Client
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+
+client = mqtt.Client(
+    mqtt.CallbackAPIVersion.VERSION2, client_id=f"logibridge-inference-{TRUCK_ID}"
+)
+client.will_set(
+    TOPIC_STATUS,
+    json.dumps({"truck_id": TRUCK_ID, "state": "offline", "model": MODEL_NAME}),
+    qos=QOS_STATUS,
+    retain=True,
+)
+client.reconnect_delay_set(min_delay=1, max_delay=30)
 client.on_connect = on_connect
 client.on_connect_fail = on_connect_fail
 client.on_message = on_message
@@ -222,14 +280,36 @@ client.on_message = on_message
 print(f"[MQTT] Connecting to broker at {MQTT_BROKER}:{MQTT_PORT}...", flush=True)
 client.connect_async(MQTT_BROKER, MQTT_PORT, 60)
 
-# Start network loop to continuously listen for simulator data
 client.loop_start()
 
-print("-> Edge service started; waiting for MQTT broker connection... (Press Ctrl+C to exit)", flush=True)
+print(
+    "-> Edge service started; waiting for MQTT broker connection... (Press Ctrl+C to exit)",
+    flush=True,
+)
+stop_requested = threading.Event()
+signal.signal(signal.SIGTERM, lambda *_: stop_requested.set())
 try:
-    while True:
-        time.sleep(1)
+    while not stop_requested.wait(1.0):
+        pass
 except KeyboardInterrupt:
+    pass
+finally:
     print("\n-> Shutting down Edge Inference Service gracefully...")
+    try:
+        client.publish(
+            TOPIC_STATUS,
+            json.dumps(
+                {
+                    "truck_id": TRUCK_ID,
+                    "state": "offline",
+                    "model": MODEL_NAME,
+                    "timestamp": time.time(),
+                }
+            ),
+            qos=QOS_STATUS,
+            retain=True,
+        ).wait_for_publish(timeout=5)
+    except (RuntimeError, ValueError):
+        pass
     client.loop_stop()
     client.disconnect()

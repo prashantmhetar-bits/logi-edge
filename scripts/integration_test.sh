@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# End-to-end check of one model variant inside the inference image:
-#   container (MODEL_PATH=<model>) -> logibridge/trucks/<truck>/inference -> payload validation
-#   + drift monitor builds a reference distribution from the same live payloads.
-# Requires: a running broker container named "mosquitto" on localhost:1883 and the
-# sensor simulator already publishing to it.
-#
-# Usage: scripts/integration_test.sh <image> <model_file> [truck_id] [messages]
 set -euo pipefail
 
 IMAGE="$1"
@@ -50,7 +43,7 @@ MONITOR_PID=$!
 docker exec mosquitto mosquitto_sub -h localhost \
   -t "logibridge/trucks/$TRUCK_ID/inference" -C "$MESSAGES" -W 120 > "$OUT/payloads.jsonl"
 
-python - "$OUT/payloads.jsonl" "$TRUCK_ID" <<'PY'
+python - "$OUT/payloads.jsonl" "$TRUCK_ID" "$MODEL" <<'PY'
 import json, sys
 sys.path.insert(0, "inference")
 from temperature_rule import apply_rule
@@ -60,18 +53,32 @@ assert rows, "no payloads received"
 for r in rows:
     assert {"truck_id", "status", "model_status", "temp_mean_c", "confidence", "probabilities", "timestamp"} <= set(r), r
     assert r["truck_id"] == sys.argv[2], r
+    assert r["model"] == sys.argv[3], f"MODEL_PATH switch failed: {r}"
     assert r["status"] in STATUSES, r
     p = r["probabilities"]
     assert isinstance(p, list) and len(p) == 3, r
     assert all(0.0 <= x <= 1.0 for x in p), r
-    assert abs(sum(p) - 1.0) < 0.02, f"probabilities do not sum to 1: {r}"   # INT8 output step = 1/256
+    assert abs(sum(p) - 1.0) < 0.02, f"probabilities do not sum to 1: {r}"
     assert abs(max(p) - r["confidence"]) < 1e-6, r
     assert r["model_status"] == STATUSES[p.index(max(p))], r
-    # status = model class raised by the temperature rule (container default setpoint 4.0 C)
     assert r["status"] == STATUSES[apply_rule(p.index(max(p)), r["temp_mean_c"], 4.0)], r
     print(f'{r["status"]:<9} model={r["model_status"]:<9} confidence={r["confidence"]:.3f}  '
           f'P(Normal)={p[0]:.3f}  temp_mean={r["temp_mean_c"]:.2f} C')
 print(f"OK: {len(rows)} valid payloads")
+PY
+
+docker exec mosquitto mosquitto_sub -h localhost -t "logibridge/trucks/$TRUCK_ID/status" -C 1 -W 10 \
+  | tee "$OUT/status.json"
+python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['state']=='online', d; print('status OK:', d)" "$OUT/status.json"
+
+docker exec "$NAME" cat /var/lib/logibridge/alerts.jsonl | tee "$OUT/alerts.jsonl"
+python3 - "$OUT/alerts.jsonl" "$TRUCK_ID" <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+assert rows, "no alert in the local alert log under --anomaly combined"
+assert rows[0]["truck_id"] == sys.argv[2] and rows[0]["status"] in ("WARNING", "CRITICAL"), rows[0]
+assert [r["seq"] for r in rows] == list(range(1, len(rows) + 1)), rows
+print(f"alert log OK: {len(rows)} alert(s), first = {rows[0]['event']} -> {rows[0]['status']}")
 PY
 
 for i in $(seq 1 30); do
