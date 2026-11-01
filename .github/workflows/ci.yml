@@ -2,6 +2,8 @@ name: LogiEdge Continuous Integration
 
 on:
   push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -15,6 +17,7 @@ env:
   PYTHON_VERSION: "3.11"
   TRAIN_DEPS: tensorflow==2.21.0 keras==3.15.1 numpy==2.4.6 pandas==3.1.0 scikit-learn==1.9.1
   PRUNE_DEPS: tensorflow-model-optimization==0.8.1 tf-keras==2.21.0
+  BENCH_DEPS: psutil==7.2.2 matplotlib==3.11.2
   IMAGE_NAME: logi-edge
   ANSIBLE_DEPS: ansible==14.5.0 ansible-lint==26.10.1 docker==7.2.0
 
@@ -24,17 +27,20 @@ defaults:
 
 jobs:
   sanity:
-    name: Repository Validation and Unit Testing
+    name: "Repository Validation, Compliance Checks and Unit Tests"
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install test dependencies
+        run: pip install pytest paho-mqtt==2.1.0 numpy==2.4.6 pyyaml==6.0.3
 
       - name: Show repository layout
         run: find . -path ./.git -prune -o -type f -print | sort
@@ -42,39 +48,56 @@ jobs:
       - name: Verify required files exist
         run: |
           for f in \
+            README.md scenario_architecture/constraint_analysis.md scenario_architecture/system_architecture.png \
+            hardware/hardware_justification.md \
             dataset_normal.csv dataset_warning.csv dataset_critical.csv \
             data_pipeline/simulator.py data_pipeline/preprocessing.py data_pipeline/training_stats.npy \
-            training/dataset_utils.py training/model_eval.py training/generate_dataset.py training/train_model.py training/convert_ptq.py training/prune_quantise.py \
+            data_pipeline/normalisation_experiment.py data_pipeline/mqtt_architecture.md data_pipeline/mqtt_topic_tree.png \
+            training/dataset_utils.py training/model_eval.py training/generate_dataset.py training/train_model.py \
+            training/convert_ptq.py training/prune_quantise.py \
             optimisation/benchmark.py optimisation/pareto.py \
             optimisation/results/benchmark_results.json optimisation/results/benchmark_results.csv optimisation/results/pareto_chart.png \
-            deployment/deployment_recommendation.md \
-            inference/Dockerfile inference/inference_service.py inference/temperature_rule.py inference/requirements.txt \
-            monitoring/drift_monitor.py scripts/integration_test.sh tests/test_drift_monitor.py tests/test_temperature_rule.py \
-            deployment/logibridge_deploy.yml deployment/inventory.ini
+            inference/Dockerfile inference/inference_service.py inference/temperature_rule.py inference/alerting.py inference/requirements.txt \
+            monitoring/drift_monitor.py monitoring/psi_report.py \
+            deployment/logibridge_deploy.yml deployment/inventory.ini deployment/deployment_recommendation.md \
+            deployment/mosquitto/mosquitto.conf \
+            scripts/integration_test.sh scripts/offline_sync_test.sh scripts/ota_layer_demo.sh scripts/ota_report.py \
+            scripts/psi_drift_demo.sh scripts/ci_summary.py \
+            tests/test_drift_monitor.py tests/test_temperature_rule.py tests/test_alerting.py
           do
-            test -s "$f" || { echo "::error::missing or empty: $f"; exit 1; }
+            test -s "$f" || { echo "::error file=$f::missing or empty: $f"; exit 1; }
             echo "ok  $f"
           done
 
       - name: Python syntax check
-        run: python -m compileall -q data_pipeline training optimisation inference monitoring tests
+        run: python -m compileall -q data_pipeline training optimisation inference monitoring tests scripts
 
       - name: Unit tests
-        run: |
-          pip install pytest paho-mqtt==2.1.0
-          pytest -q tests
+        run: pytest -v tests 2>&1 | tee pytest.log
+
+      - name: "D2 compliance: Dockerfile rules"
+        run: python scripts/ci_summary.py dockerfile inference/Dockerfile
+
+      - name: "E2 compliance: playbook has exactly 7 tasks"
+        run: python scripts/ci_summary.py playbook deployment/logibridge_deploy.yml
+
+      - name: "C2: normalisation statistics loaded by every stage"
+        run: python scripts/ci_summary.py stats data_pipeline/training_stats.npy
+
+      - name: Submission deliverables (warnings only)
+        run: python scripts/ci_summary.py deliverables
 
   train-m1:
-    name: "Model Training: M1 FP32 Baseline"
+    name: "Model Training: M1 FP32 Baseline (D1/F1)"
     needs: sanity
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -89,14 +112,17 @@ jobs:
         run: python training/train_model.py 2>&1 | tee m1_train.log
 
       - name: M1 metrics
-        run: cat optimisation/results/metrics_m1_fp32.json
+        run: |
+          cat optimisation/results/metrics_m1_fp32.json
+          python scripts/ci_summary.py metrics optimisation/results/metrics_m1_fp32.json
 
       - name: Upload M1 artifacts
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: model-m1-fp32
           path: |
             training/models/cold_chain_mlp_fp32.keras
+            training/models/cold_chain_mlp_fp32_savedmodel/
             optimisation/results/metrics_m1_fp32.json
             m1_train.log
             pip-freeze-train.txt
@@ -104,16 +130,16 @@ jobs:
           retention-days: 14
 
   convert-m2:
-    name: "Model Optimisation: M2 Post-Training INT8 Quantisation"
+    name: "Model Optimisation: M2 Post-Training INT8 Quantisation (F1)"
     needs: train-m1
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -123,18 +149,20 @@ jobs:
           pip install $TRAIN_DEPS
 
       - name: Download M1 model
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: model-m1-fp32
 
-      - name: Convert M2 (calibrate on normalised training split, gate on INT8 accuracy)
+      - name: Convert M2 (>= 200 calibration samples, gate on INT8 accuracy and Critical recall)
         run: python training/convert_ptq.py 2>&1 | tee m2_convert.log
 
       - name: M2 metrics
-        run: cat optimisation/results/metrics_m2_ptq_int8.json
+        run: |
+          cat optimisation/results/metrics_m2_ptq_int8.json
+          python scripts/ci_summary.py metrics optimisation/results/metrics_m2_ptq_int8.json
 
       - name: Upload M2 artifacts
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: model-m2-ptq-int8
           path: |
@@ -145,16 +173,16 @@ jobs:
           retention-days: 14
 
   prune-m3:
-    name: "Model Optimisation: M3 Structured Pruning and INT8 Quantisation"
+    name: "Model Optimisation: M3 35% Structured Pruning + INT8 (F1)"
     needs: train-m1
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -164,18 +192,20 @@ jobs:
           pip install $TRAIN_DEPS $PRUNE_DEPS
 
       - name: Download M1 model
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: model-m1-fp32
 
-      - name: Structured pruning of M1 + INT8 PTQ (gate on INT8 accuracy)
+      - name: Structured pruning of M1 (PolynomialDecay 0 -> 35%) + INT8 PTQ (gated)
         run: python training/prune_quantise.py 2>&1 | tee m3_prune.log
 
       - name: M3 metrics
-        run: cat optimisation/results/metrics_m3_pruned_int8.json
+        run: |
+          cat optimisation/results/metrics_m3_pruned_int8.json
+          python scripts/ci_summary.py metrics optimisation/results/metrics_m3_pruned_int8.json
 
       - name: Upload M3 artifacts
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: model-m3-pruned-int8
           path: |
@@ -186,8 +216,129 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  normalisation-experiment:
+    name: "Normalisation Experiment: Correct vs 3-Sigma-Shifted Stats (C2)"
+    needs: [train-m1, convert-m2, prune-m3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install training dependencies
+        run: pip install $TRAIN_DEPS
+
+      - name: Download M1, M2, M3
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: model-m*
+          merge-multiple: true
+
+      - name: Run inference with correct stats, then with stats shifted by +3σ and -3σ
+        run: python data_pipeline/normalisation_experiment.py 2>&1 | tee normalisation_experiment.log
+
+      - name: Upload results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: c2-normalisation-experiment
+          path: |
+            data_pipeline/results/normalisation_experiment.json
+            normalisation_experiment.log
+          if-no-files-found: error
+          retention-days: 30
+
+  benchmark:
+    name: "Five-Metric Benchmark and Pareto Analysis (F2)"
+    needs: [train-m1, convert-m2, prune-m3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install benchmark dependencies
+        run: pip install $TRAIN_DEPS $BENCH_DEPS
+
+      - name: Download M1, M2, M3
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: model-m*
+          merge-multiple: true
+
+      - name: CPU of this runner
+        run: lscpu | grep -E 'Model name|^CPU\(s\)|Thread|MHz' || true
+
+      - name: Benchmark M1/M2/M3 (10 warm-up excluded, 200 timed runs)
+        run: python optimisation/benchmark.py --tdp-w 15 2>&1 | tee benchmark.log
+
+      - name: Pareto frontier and chart
+        run: |
+          python optimisation/pareto.py 2>&1 | tee -a benchmark.log
+          cat optimisation/results/benchmark_results.csv
+          python scripts/ci_summary.py benchmark optimisation/results/benchmark_results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: f2-benchmark-ci-runner
+          path: |
+            optimisation/results/benchmark_results.json
+            optimisation/results/benchmark_results.csv
+            optimisation/results/pareto_chart.png
+            benchmark.log
+          if-no-files-found: error
+          retention-days: 30
+
+  ota-demo:
+    name: "OTA Layer-Cache Demo and 85-Truck Bandwidth Saving (D2)"
+    needs: prune-m3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download the new M3 release (retrained in this run)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: model-m3-pruned-int8
+          path: ${{ runner.temp }}/new-m3
+
+      - name: "v1 build -> model-only change -> v2 rebuild -> registry layer sizes -> fleet bandwidth"
+        run: |
+          bash scripts/ota_layer_demo.sh \
+            "$RUNNER_TEMP/new-m3/training/models/cold_chain_mlp_pruned_int8.tflite" "$RUNNER_TEMP/ota-demo"
+
+      - name: Upload OTA evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: d2-ota-layer-cache
+          path: ${{ runner.temp }}/ota-demo/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f ota-registry 2>/dev/null || true
+
   build-image:
-    name: Container Build, Integration Testing and Deployment Verification
+    name: "Container Build, MQTT Integration, Offline Sync and Ansible Deployment (D2/E2)"
     needs: [train-m1, convert-m2, prune-m3]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -195,32 +346,23 @@ jobs:
       TRUCK_ID: truck_001
       ANOMALY_MODE: combined
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
-      - name: Download M1 model
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Download M1, M2, M3
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          name: model-m1-fp32
-
-      - name: Download M2 model
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: model-m2-ptq-int8
-
-      - name: Download M3 model
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: model-m3-pruned-int8
+          pattern: model-m*
+          merge-multiple: true
 
       - name: Models in build context
         run: ls -la training/models/cold_chain_mlp_fp32.keras training/models/cold_chain_mlp_ptq_int8.tflite training/models/cold_chain_mlp_pruned_int8.tflite
 
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
 
       - name: Build image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: inference/Dockerfile
@@ -236,12 +378,12 @@ jobs:
           docker history "$IMAGE_NAME:$GITHUB_SHA"
           echo "runs as user: $(docker run --rm --entrypoint id "$IMAGE_NAME:$GITHUB_SHA" -un)"
 
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install simulator + monitor dependencies
-        run: pip install paho-mqtt==2.1.0
+        run: pip install paho-mqtt==2.1.0 pyyaml==6.0.3
 
       - name: Start Mosquitto broker
         run: |
@@ -250,10 +392,12 @@ jobs:
             -v "$RUNNER_TEMP/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" \
             eclipse-mosquitto:2
 
-      - name: Start simulator
+      - name: Start sensor simulator (C1, --anomaly combined)
         run: |
           nohup python data_pipeline/simulator.py --anomaly "$ANOMALY_MODE" > "$RUNNER_TEMP/simulator.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/simulator.pid"
+          sleep 3
+          head -n 6 "$RUNNER_TEMP/simulator.log"
 
       - name: Integration - M1 FP32
         run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_fp32.keras "$TRUCK_ID"
@@ -263,6 +407,12 @@ jobs:
 
       - name: Integration - M3 pruned INT8 (same image, MODEL_PATH switch)
         run: bash scripts/integration_test.sh "$IMAGE_NAME:$GITHUB_SHA" cold_chain_mlp_pruned_int8.tflite "$TRUCK_ID"
+
+      - name: Integration summary
+        run: python scripts/ci_summary.py payloads "$RUNNER_TEMP"
+
+      - name: Offline store-and-forward - alerts raised in a coverage gap reach the ops centre
+        run: bash scripts/offline_sync_test.sh "$TRUCK_ID" 5
 
       - name: Install Ansible in an isolated Python 3.12 environment (E2)
         run: |
@@ -284,7 +434,7 @@ jobs:
           docker push localhost:5000/logi-edge:v1
           docker rmi localhost:5000/logi-edge:v1
 
-      - name: Ansible deploy - run 1 and run 2 must report changed=0 (E2)
+      - name: Ansible deploy - run 1 deploys, run 2 must report changed=0 (E2)
         env:
           ANSIBLE_FORCE_COLOR: "0"
           ANSIBLE_LOCALHOST_WARNING: "False"
@@ -299,6 +449,7 @@ jobs:
           recap() { grep -E '^truck_001 +:' "$RUNNER_TEMP/ansible_run$1.log"; }
           echo "run 1: $(recap 1)"
           echo "run 2: $(recap 2)"
+          python scripts/ci_summary.py ansible "$RUNNER_TEMP/ansible_run1.log" "$RUNNER_TEMP/ansible_run2.log"
           recap 1 | grep -Eq 'changed=[1-9]' || { echo "::error::run 1 deployed nothing"; exit 1; }
           recap 2 | grep -Eq 'changed=0 .*failed=0' || { echo "::error::run 2 is not idempotent"; exit 1; }
 
@@ -308,6 +459,21 @@ jobs:
             -t "logibridge/trucks/truck_ansible/inference" -C 1 -W 90 | tee "$RUNNER_TEMP/ansible_payload.json"
           test -s "$RUNNER_TEMP/ansible_payload.json"
           docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' logibridge-inference | grep MODEL_PATH
+          docker inspect -f '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}}{{println}}{{end}}' logibridge-inference
+
+      - name: Upload integration + deployment evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: d2-e2-integration-evidence
+          path: |
+            ${{ runner.temp }}/it-*/
+            ${{ runner.temp }}/ansible_run*.log
+            ${{ runner.temp }}/ansible_payload.json
+            ${{ runner.temp }}/offline-sync/received.jsonl
+            ${{ runner.temp }}/simulator.log
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Dump logs
         if: always()
@@ -324,3 +490,51 @@ jobs:
         run: |
           kill "$(cat "$RUNNER_TEMP/simulator.pid" 2>/dev/null)" 2>/dev/null || true
           docker rm -f mosquitto registry logibridge-inference 2>/dev/null || true
+
+  report:
+    name: "Pipeline Report"
+    if: always()
+    needs:
+      [
+        sanity,
+        train-m1,
+        convert-m2,
+        prune-m3,
+        normalisation-experiment,
+        benchmark,
+        ota-demo,
+        build-image,
+      ]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Brief component coverage
+        env:
+          R_SANITY: ${{ needs.sanity.result }}
+          R_M1: ${{ needs.train-m1.result }}
+          R_M2: ${{ needs.convert-m2.result }}
+          R_M3: ${{ needs.prune-m3.result }}
+          R_C2: ${{ needs.normalisation-experiment.result }}
+          R_F2: ${{ needs.benchmark.result }}
+          R_OTA: ${{ needs.ota-demo.result }}
+          R_BUILD: ${{ needs.build-image.result }}
+        run: |
+          icon() { case "$1" in success) echo "✅ $1";; skipped) echo "⏭️ $1";; *) echo "❌ $1";; esac; }
+          {
+            echo "## LogiEdge CI: brief component coverage"
+            echo ""
+            echo "| Brief task | What CI shows | Job | Result |"
+            echo "|---|---|---|---|"
+            echo "| D2 / E2 / C2 | Dockerfile rules, playbook = 7 tasks, training stats, unit tests | Repository Validation | $(icon "$R_SANITY") |"
+            echo "| D1 / F1 M1 | FP32 MLP 32→16, accuracy > 88 %, Critical recall > 95 % | M1 FP32 | $(icon "$R_M1") |"
+            echo "| F1 M2 | Full INT8 PTQ, ≥ 200 calibration samples, gated | M2 PTQ INT8 | $(icon "$R_M2") |"
+            echo "| F1 M3 | 35 % structured pruning (PolynomialDecay) + INT8, gated | M3 Pruned + INT8 | $(icon "$R_M3") |"
+            echo "| C2 | Accuracy with correct vs 3σ-shifted stats | Normalisation Experiment | $(icon "$R_C2") |"
+            echo "| F2 | Mean/p95 latency, size, accuracy, energy + Pareto chart | Benchmark | $(icon "$R_F2") |"
+            echo "| D2 | Only the model layer rebuilt; bandwidth saving for 85 trucks | OTA Demo | $(icon "$R_OTA") |"
+            echo "| C1 / D2 / E2 / §2 | Simulator → container → MQTT for M1/M2/M3; offline store-and-forward; Ansible run twice, changed=0 | Container + Ansible | $(icon "$R_BUILD") |"
+            echo "| E1 | Live PSI drift injection and recovery (real time, ~95 min) | see **LogiEdge Live Demos** workflow | — |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for r in "$R_SANITY" "$R_M1" "$R_M2" "$R_M3" "$R_C2" "$R_F2" "$R_OTA" "$R_BUILD"; do
+            [ "$r" = "success" ] || exit 1
+          done
