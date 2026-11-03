@@ -1,0 +1,1453 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LogiEdge PSI Monitor</title>
+  <meta name="claude:viewport-fit-sides" content="cover" />
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+  />
+  <style>
+    /* Layout: an instrument console. Controls + headline PSI on top, three live panels, then the PSI trace and the monitor's own log. */
+    :root {
+      --bg: #eef2f2;
+      --panel: #fbfcfc;
+      --ink: #142326;
+      --muted: #5b6d70;
+      --rule: #d3dcdd;
+      --accent: #0f6e7d;
+      --accent-soft: #d6eaed;
+      --ref: #9aaeb1;
+      --ok: #217a4b;
+      --ok-soft: #dff0e6;
+      --alert: #b3261e;
+      --alert-soft: #f7e0de;
+      --warn: #9a5b00;
+      --warn-soft: #f6ead6;
+      --band: rgba(179, 38, 30, 0.07);
+      --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+      --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+      --mono:
+        "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #0e1719;
+        --panel: #152225;
+        --ink: #e3ecec;
+        --muted: #93a6a8;
+        --rule: #26393c;
+        --accent: #5cc4d3;
+        --accent-soft: #153a40;
+        --ref: #5b7174;
+        --ok: #5fcf91;
+        --ok-soft: #14301f;
+        --alert: #ff7b70;
+        --alert-soft: #3a1714;
+        --warn: #f0b155;
+        --warn-soft: #34260f;
+        --band: rgba(255, 123, 112, 0.08);
+        color-scheme: dark;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #0e1719;
+      --panel: #152225;
+      --ink: #e3ecec;
+      --muted: #93a6a8;
+      --rule: #26393c;
+      --accent: #5cc4d3;
+      --accent-soft: #153a40;
+      --ref: #5b7174;
+      --ok: #5fcf91;
+      --ok-soft: #14301f;
+      --alert: #ff7b70;
+      --alert-soft: #3a1714;
+      --warn: #f0b155;
+      --warn-soft: #34260f;
+      --band: rgba(255, 123, 112, 0.08);
+      color-scheme: dark;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--body);
+      font-size: 15px;
+      line-height: 1.5;
+      padding-left: max(16px, env(safe-area-inset-left, 0px));
+      padding-right: max(16px, env(safe-area-inset-right, 0px));
+      padding-block: 20px 32px;
+    }
+    .wrap {
+      max-width: 1120px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    h1 {
+      font-family: var(--display);
+      font-weight: 800;
+      font-size: clamp(1.5rem, 3.4vw, 2.1rem);
+      letter-spacing: -0.01em;
+      margin: 0;
+      text-wrap: balance;
+    }
+    .sub {
+      color: var(--muted);
+      margin: 2px 0 0;
+      font-size: 0.9rem;
+    }
+    .tag {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--muted);
+      border: 1px solid var(--rule);
+      border-radius: 4px;
+      padding: 3px 8px;
+      white-space: nowrap;
+    }
+    .bar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      background: var(--panel);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 12px;
+    }
+    button,
+    select {
+      font-family: var(--body);
+      font-size: 0.92rem;
+      font-weight: 600;
+      border-radius: 6px;
+      padding: 8px 14px;
+      cursor: pointer;
+      border: 1px solid var(--rule);
+      background: var(--bg);
+      color: var(--ink);
+    }
+    button:focus-visible,
+    select:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    #inject {
+      background: var(--alert);
+      border-color: var(--alert);
+      color: var(--panel);
+    }
+    #restore {
+      background: var(--ok);
+      border-color: var(--ok);
+      color: var(--panel);
+    }
+    .spacer {
+      flex: 1;
+    }
+    label.speed {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .clock {
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .headline {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 16px;
+      align-items: center;
+      background: var(--panel);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .psi-big {
+      font-family: var(--mono);
+      font-weight: 600;
+      font-size: clamp(2.2rem, 6vw, 3.4rem);
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+    .psi-big small {
+      display: block;
+      font-family: var(--body);
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .state {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+    }
+    .pill {
+      align-self: flex-start;
+      font-family: var(--mono);
+      font-weight: 600;
+      font-size: 0.85rem;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+    .pill.clean {
+      background: var(--ok-soft);
+      color: var(--ok);
+    }
+    .pill.alert {
+      background: var(--alert-soft);
+      color: var(--alert);
+    }
+    .pill.recover {
+      background: var(--warn-soft);
+      color: var(--warn);
+    }
+    .pill.wait {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .explain {
+      margin: 0;
+      color: var(--muted);
+      max-width: 70ch;
+    }
+
+    .grid3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+    @media (max-width: 880px) {
+      .grid3 {
+        grid-template-columns: 1fr;
+      }
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      min-width: 0;
+    }
+    .panel h2 {
+      font-family: var(--display);
+      font-size: 0.95rem;
+      font-weight: 700;
+      margin: 0;
+    }
+    .panel .k {
+      font-size: 0.72rem;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .readings {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .val {
+      font-family: var(--mono);
+      font-size: 1.35rem;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .val.bad {
+      color: var(--alert);
+    }
+    canvas {
+      width: 100%;
+      display: block;
+    }
+    #spark {
+      height: 70px;
+    }
+    #trace {
+      height: 240px;
+    }
+    .pnorm-row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+    .meter {
+      height: 10px;
+      background: var(--bg);
+      border: 1px solid var(--rule);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .meter i {
+      display: block;
+      height: 100%;
+      background: var(--accent);
+      width: 0;
+      transition: width 0.25s;
+    }
+    .note {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin: 0;
+    }
+
+    .hist {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      align-items: end;
+      height: 130px;
+    }
+    .bin {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      height: 100%;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+    .bars {
+      display: flex;
+      gap: 3px;
+      align-items: flex-end;
+      height: 100%;
+    }
+    .bars span {
+      flex: 1;
+      border-radius: 3px 3px 0 0;
+      min-height: 2px;
+      transition: height 0.25s;
+    }
+    .bars .r {
+      background: var(--ref);
+    }
+    .bars .w {
+      background: var(--accent);
+    }
+    .binlab {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      color: var(--muted);
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .legend b {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      margin-right: 5px;
+      vertical-align: -1px;
+    }
+
+    .tracebox {
+      background: var(--panel);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 14px;
+      display: grid;
+      gap: 8px;
+    }
+    .log {
+      background: var(--panel);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .log h2 {
+      font-family: var(--display);
+      font-size: 0.95rem;
+      margin: 0 0 8px;
+    }
+    pre#out {
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      line-height: 1.55;
+      height: 210px;
+      overflow: auto;
+      white-space: pre;
+      color: var(--ink);
+    }
+    pre#out .a {
+      color: var(--alert);
+      font-weight: 600;
+    }
+    pre#out .e {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    pre#out .m {
+      color: var(--muted);
+    }
+    footer {
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+    footer code,
+    .explain code {
+      font-family: var(--mono);
+      font-size: 0.85em;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .meter i,
+      .bars span {
+        transition: none;
+      }
+    }
+    .checks {
+      background: var(--panel);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 14px;
+      display: grid;
+      gap: 8px;
+    }
+    .checks h2,
+    .ans h2 {
+      font-family: var(--display);
+      font-size: 0.95rem;
+      margin: 0;
+    }
+    .chk {
+      display: grid;
+      grid-template-columns: 26px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 10px;
+      border-radius: 6px;
+      background: var(--bg);
+    }
+    .chk .box {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: 2px solid var(--rule);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 0.8rem;
+      color: var(--panel);
+    }
+    .chk.done {
+      background: var(--ok-soft);
+    }
+    .chk.done .box {
+      background: var(--ok);
+      border-color: var(--ok);
+    }
+    .chk code {
+      font-family: var(--mono);
+      font-size: 0.85em;
+    }
+    .chk .ev {
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .chk.done .ev {
+      color: var(--ok);
+      font-weight: 600;
+    }
+    .ans {
+      background: var(--panel);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+    .ans .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    #runpb {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--panel);
+    }
+    pre#pbout {
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      line-height: 1.55;
+      height: 300px;
+      overflow: auto;
+      white-space: pre;
+      background: var(--bg);
+      border: 1px solid var(--rule);
+      border-radius: 6px;
+      padding: 10px;
+    }
+    pre#pbout .c {
+      color: var(--warn);
+      font-weight: 600;
+    }
+    pre#pbout .o {
+      color: var(--ok);
+    }
+    pre#pbout .s {
+      color: var(--muted);
+    }
+    pre#pbout .h {
+      font-weight: 600;
+    }
+    pre#pbout .z {
+      background: var(--ok-soft);
+      color: var(--ok);
+      font-weight: 700;
+    }
+  </style>
+
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>LogiEdge PSI Monitor</h1>
+        <p class="sub">
+          Live drift monitoring on truck_001, the same logic as
+          <code>monitoring/drift_monitor.py</code>
+        </p>
+      </div>
+      <span class="tag">Simulation · model output approximated</span>
+    </header>
+
+    <div class="bar" role="group" aria-label="Demo controls">
+      <button id="inject" type="button">
+        Inject fault (--anomaly combined)
+      </button>
+      <button id="restore" type="button" disabled>
+        Restore clean (--anomaly none)
+      </button>
+      <button id="reset" type="button">Reset</button>
+      <span class="spacer"></span>
+      <label class="speed" for="speed"
+        >Speed
+        <select id="speed">
+          <option value="1">1× real time</option>
+          <option value="10">10×</option>
+          <option value="60" selected>60× (1 min per s)</option>
+          <option value="180">180×</option>
+        </select>
+      </label>
+      <button id="pause" type="button">Pause</button>
+      <span class="clock" id="clock">t+00:00</span>
+    </div>
+
+    <section class="headline" aria-live="polite">
+      <div class="psi-big">
+        <small>Current PSI</small><span id="psi">—</span>
+      </div>
+      <div class="state">
+        <span class="pill wait" id="pill">WARMING UP</span>
+        <p class="explain" id="explain">
+          Collecting the first 20 inferences of the window. PSI is reported
+          every 60 s on the last 100 inferences.
+        </p>
+      </div>
+    </section>
+
+    <section class="checks" aria-live="polite">
+      <h2>Demo Objectives</h2>
+      <div class="chk" id="c1">
+        <span class="box">✓</span
+        ><span
+          >Alert printed:
+          <code>[LOGIBRIDGE DRIFT ALERT] PSI={value:.3f}</code> when PSI &gt;
+          0.25</span
+        ><span class="ev" id="e1">waiting</span>
+      </div>
+      <div class="chk" id="c2">
+        <span class="box">✓</span
+        ><span
+          >PSI crosses 0.25 within 5 minutes of
+          <code>--anomaly combined</code></span
+        ><span class="ev" id="e2">waiting</span>
+      </div>
+      <div class="chk" id="c3">
+        <span class="box">✓</span
+        ><span>After clean data returns, PSI drops back below 0.10</span
+        ><span class="ev" id="e3">waiting</span>
+      </div>
+    </section>
+
+    <div class="grid3">
+      <section class="panel">
+        <h2>1 · Sensors on the truck</h2>
+        <div class="readings">
+          <div>
+            <div class="k">Cargo temp (MA-5)</div>
+            <div class="val" id="temp">—</div>
+          </div>
+          <div>
+            <div class="k">Vibration RMS</div>
+            <div class="val" id="vib">—</div>
+          </div>
+        </div>
+        <canvas
+          id="spark"
+          aria-label="Last 3 minutes of cargo temperature"
+        ></canvas>
+        <p class="note">
+          Setpoint 4.0 °C, compressor ≈ 0.45 g. The fault adds +0.08 °C per
+          reading and steps vibration to ≈ 1.2 g (bearing wear).
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>2 · Model answer every 10 s</h2>
+        <div class="k">P(Normal), the score PSI watches</div>
+        <div class="pnorm-row">
+          <span class="val" id="pn">—</span><span class="note" id="cls">—</span>
+        </div>
+        <div class="meter" aria-hidden="true"><i id="pnbar"></i></div>
+        <p class="note">
+          Under a fault the model is confidently Critical, so its top confidence
+          stays high. P(Normal) collapses from about 1 to about 0, which is the
+          shift that shows up.
+        </p>
+      </section>
+
+      <section class="panel">
+        <h2>3 · Reference vs last 100</h2>
+        <div class="hist" id="hist"></div>
+        <div class="legend">
+          <span
+            ><b style="background: var(--ref)"></b>Reference (300 clean)</span
+          ><span><b style="background: var(--accent)"></b>Current window</span>
+        </div>
+      </section>
+    </div>
+
+    <section class="tracebox">
+      <div class="legend">
+        <span><b style="background: var(--accent)"></b>PSI every 60 s</span
+        ><span><b style="background: var(--alert)"></b>Alert &gt; 0.25</span
+        ><span><b style="background: var(--ok)"></b>Recovered &lt; 0.10</span
+        ><span><b style="background: var(--band)"></b>Fault injected</span>
+      </div>
+      <canvas id="trace" aria-label="PSI over time"></canvas>
+    </section>
+
+    <section class="log">
+      <h2>Monitor output</h2>
+      <pre id="out" aria-live="off"></pre>
+    </section>
+
+    <section class="ans" aria-label="Ansible playbook simulation">
+      <h2>E2 · Ansible playbook</h2>
+      <p class="note">
+        Each task first checks what is already on the truck and only acts if
+        something differs. Run it twice with no changes: the second run reports
+        <code>changed=0</code>. Change the model file and run again to see which
+        tasks react.
+      </p>
+      <div class="row">
+        <button id="runpb" type="button">Run ansible-playbook</button>
+        <button id="newmodel" type="button">Ship a new model file</button>
+        <button id="pbreset" type="button">Fresh truck</button>
+      </div>
+      <div class="chk" id="c4">
+        <span class="box">✓</span
+        ><span>Second run without changes reports <code>changed=0</code></span
+        ><span class="ev" id="e4">waiting</span>
+      </div>
+      <pre id="pbout" aria-live="off"></pre>
+    </section>
+
+    <footer>
+      PSI = Σ (a − e) · ln(a / e) over the 4 bins [0, 0.25), [0.25, 0.5), [0.5,
+      0.75), [0.75, 1], with +0.5 added to every bin so an empty bin never gives
+      ln(0). Sensor rates, filter, window, step, bins, smoothing and thresholds
+      match the LogiEdge code. P(Normal) comes from a simple stand-in for the
+      trained model, so exact values differ from the real M3.
+    </footer>
+  </div>
+
+  <script>
+    (function () {
+      "use strict";
+      var EDGES = [0, 0.25, 0.5, 0.75, 1];
+      var LABELS = ["0–.25", ".25–.5", ".5–.75", ".75–1"];
+      var WINDOW = 100,
+        REF_N = 300,
+        MIN_SAMPLES = 20,
+        INTERVAL = 60,
+        STEP = 10,
+        WIN_S = 30;
+      var ALERT = 0.25,
+        RECOVERED = 0.1,
+        ALPHA = 0.5;
+
+      function gauss(m, s) {
+        var u = 1 - Math.random(),
+          v = Math.random();
+        return m + s * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+      }
+      function binIndex(p) {
+        for (var i = 0; i < 3; i++) if (p < EDGES[i + 1]) return i;
+        return 3;
+      }
+      function counts(arr) {
+        var c = [0, 0, 0, 0];
+        arr.forEach(function (p) {
+          c[binIndex(p)]++;
+        });
+        return c;
+      }
+      function smooth(c) {
+        var t = c[0] + c[1] + c[2] + c[3] + ALPHA * 4;
+        return c.map(function (x) {
+          return (x + ALPHA) / t;
+        });
+      }
+      function psi(ref, cur) {
+        var e = smooth(ref),
+          a = smooth(cur),
+          s = 0;
+        for (var i = 0; i < 4; i++) s += (a[i] - e[i]) * Math.log(a[i] / e[i]);
+        return s;
+      }
+
+      function Truck() {
+        this.t = 0;
+        this.fault = false;
+        this.drift = 0;
+        this.tb = [];
+        this.vb = [];
+        this.tw = [];
+        this.vw = [];
+        this.lastStep = 0;
+        this.temp = 4;
+        this.vib = 0.45;
+      }
+      Truck.prototype.tick = function () {
+        this.t += 1;
+        if (this.fault) this.drift += 0.08;
+        var raw = gauss(4.0, 0.3) + this.drift;
+        this.tb.push(raw);
+        if (this.tb.length > 5) this.tb.shift();
+        this.temp =
+          this.tb.reduce(function (a, b) {
+            return a + b;
+          }, 0) / this.tb.length;
+        this.tw.push([this.t, this.temp]);
+        if (this.t % 2 === 0) {
+          var v = this.fault ? gauss(1.2, 0.15) : gauss(0.45, 0.05);
+          this.vb.push(v);
+          if (this.vb.length > 5) this.vb.shift();
+          this.vib =
+            this.vb.reduce(function (a, b) {
+              return a + b;
+            }, 0) / this.vb.length;
+          this.vw.push([this.t, this.vib]);
+        }
+        var cut = this.t - WIN_S;
+        while (this.tw.length && this.tw[0][0] < cut) this.tw.shift();
+        while (this.vw.length && this.vw[0][0] < cut) this.vw.shift();
+        if (
+          this.t - this.lastStep >= STEP &&
+          this.tw.length >= 5 &&
+          this.vw.length >= 3
+        ) {
+          this.lastStep = this.t;
+          return this.infer();
+        }
+        return null;
+      };
+      Truck.prototype.infer = function () {
+        var n = this.tw.length,
+          sx = 0,
+          sy = 0,
+          sxx = 0,
+          sxy = 0,
+          x0 = this.tw[0][0];
+        this.tw.forEach(function (p) {
+          var x = (p[0] - x0) / 60;
+          sx += x;
+          sy += p[1];
+          sxx += x * x;
+          sxy += x * p[1];
+        });
+        var mean = sy / n,
+          slope = (n * sxy - sx * sy) / Math.max(1e-9, n * sxx - sx * sx);
+        var rms = Math.sqrt(
+          this.vw.reduce(function (a, p) {
+            return a + p[1] * p[1];
+          }, 0) / this.vw.length,
+        );
+        var score =
+          Math.max(
+            (rms - 0.45) / 0.05 / 3,
+            Math.abs(mean - 4.0) / 1.0,
+            slope / 2.0,
+          ) + gauss(0, 0.08);
+        var pn = 1 / (1 + Math.exp(4 * (score - 1.2)));
+        pn = Math.min(1, Math.max(0, pn));
+        var cls =
+          pn > 0.5
+            ? "NORMAL"
+            : rms > 0.8
+              ? "CRITICAL"
+              : Math.abs(mean - 4) > 3
+                ? "CRITICAL"
+                : "WARNING";
+        return { pn: pn, cls: cls, mean: mean, rms: rms };
+      };
+
+      var els = {
+        psi: document.getElementById("psi"),
+        pill: document.getElementById("pill"),
+        explain: document.getElementById("explain"),
+        temp: document.getElementById("temp"),
+        vib: document.getElementById("vib"),
+        pn: document.getElementById("pn"),
+        cls: document.getElementById("cls"),
+        pnbar: document.getElementById("pnbar"),
+        hist: document.getElementById("hist"),
+        out: document.getElementById("out"),
+        clock: document.getElementById("clock"),
+        inject: document.getElementById("inject"),
+        restore: document.getElementById("restore"),
+        reset: document.getElementById("reset"),
+        pause: document.getElementById("pause"),
+        speed: document.getElementById("speed"),
+      };
+
+      var S;
+      function buildReference() {
+        var tr = new Truck(),
+          ref = [];
+        while (ref.length < REF_N) {
+          var r = tr.tick();
+          if (r) ref.push(r.pn);
+        }
+        return counts(ref);
+      }
+      function fmt(sec) {
+        var m = Math.floor(sec / 60),
+          s = Math.floor(sec % 60);
+        return (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+      }
+      function stamp() {
+        return "t+" + fmt(S.truck.t);
+      }
+      function log(text, cls) {
+        var line = document.createElement("span");
+        if (cls) line.className = cls;
+        line.textContent = text + "\n";
+        els.out.appendChild(line);
+        while (els.out.childNodes.length > 400)
+          els.out.removeChild(els.out.firstChild);
+        els.out.scrollTop = els.out.scrollHeight;
+      }
+
+      function check(n, text) {
+        var row = document.getElementById("c" + n);
+        if (!row.classList.contains("done")) {
+          row.classList.add("done");
+          document.getElementById("e" + n).textContent = text;
+        }
+      }
+      function uncheck(n) {
+        document.getElementById("c" + n).classList.remove("done");
+        document.getElementById("e" + n).textContent = "waiting";
+      }
+
+      function init() {
+        [1, 2, 3].forEach(uncheck);
+        els.out.textContent = "";
+        S = {
+          truck: new Truck(),
+          ref: buildReference(),
+          window: [],
+          psiHist: [],
+          phases: [],
+          nextReport: INTERVAL,
+          phase: "clean",
+          injectAt: null,
+          restoreAt: null,
+          alerted: false,
+          recovered: false,
+          lastPsi: null,
+          temps: [],
+          paused: false,
+          acc: 0,
+        };
+        var refP = S.ref.map(function (c) {
+          return (c / REF_N).toFixed(3);
+        });
+        log(
+          "[REFERENCE] 300/300 inferences collected (clean data, --anomaly none)",
+          "m",
+        );
+        log(
+          "  " +
+            LABELS.map(function (l, i) {
+              return "[" + l + ") count=" + S.ref[i];
+            }).join("  "),
+          "m",
+        );
+        log(
+          "[MONITOR] reference n=300 score=normal_prob p=[" +
+            refP.join(", ") +
+            "]",
+        );
+        log("[MONITOR] window=100 inferences, PSI every 60.0s, alert > 0.25");
+        els.inject.disabled = false;
+        els.restore.disabled = true;
+        setState("wait");
+        drawHist();
+        drawTrace();
+        drawSpark();
+      }
+
+      function setState(kind, text) {
+        var map = {
+          wait: [
+            "WARMING UP",
+            "wait",
+            "Collecting the first 20 inferences of the window. PSI is reported every 60 s on the last 100 inferences.",
+          ],
+          clean: [
+            "CLEAN",
+            "clean",
+            "The last 100 answers look like the clean reference, so PSI stays near 0. Press Inject fault to break the fridge.",
+          ],
+          drifting: [
+            "FAULT ACTIVE",
+            "recover",
+            "The fridge is failing. New answers have P(Normal) near 0 and land in the lowest bin; PSI rises as they fill the window.",
+          ],
+          alert: [
+            "DRIFT ALERT",
+            "alert",
+            "PSI is above 0.25: the window no longer looks like a normal day. Press Restore clean to fix the fridge.",
+          ],
+          recovering: [
+            "RECOVERING",
+            "recover",
+            "Clean data is back, but the window still holds faulty answers. Each new answer pushes one out: about 100 × 10 s ≈ 17 min.",
+          ],
+          recovered: [
+            "RECOVERED",
+            "clean",
+            "PSI is below 0.10 again: the window has refilled with clean answers.",
+          ],
+        }[kind];
+        els.pill.textContent = map[0];
+        els.pill.className = "pill " + map[1];
+        els.explain.textContent = text || map[2];
+      }
+
+      function step() {
+        var r = S.truck.tick();
+        S.temps.push(S.truck.temp);
+        if (S.temps.length > 180) S.temps.shift();
+        if (r) {
+          S.window.push(r.pn);
+          if (S.window.length > WINDOW) S.window.shift();
+          S.last = r;
+        }
+        if (S.truck.t >= S.nextReport) {
+          S.nextReport += INTERVAL;
+          if (S.window.length < MIN_SAMPLES) {
+            log(
+              stamp() +
+                " [MONITOR] warming up: " +
+                S.window.length +
+                "/" +
+                MIN_SAMPLES +
+                " inferences",
+              "m",
+            );
+          } else {
+            var c = counts(S.window),
+              v = psi(S.ref, c),
+              n = S.window.length;
+            S.lastPsi = v;
+            S.psiHist.push([S.truck.t, v]);
+            var dist = c.map(function (x) {
+              return (x / n).toFixed(2);
+            });
+            log(
+              stamp() +
+                " [MONITOR] n=" +
+                n +
+                (n < 100 ? " " : "") +
+                " PSI=" +
+                v.toFixed(3) +
+                " dist=[" +
+                dist.join(", ") +
+                "]",
+            );
+            if (v > ALERT) {
+              log("[LOGIBRIDGE DRIFT ALERT] PSI=" + v.toFixed(3), "a");
+              if (!S.alerted && S.injectAt !== null) {
+                S.alerted = true;
+                var secs = S.truck.t - S.injectAt;
+                log(
+                  ">>> alert " + secs + " s after injection (limit 300 s)",
+                  "e",
+                );
+                check(1, "PSI=" + v.toFixed(3));
+                if (secs <= 300) check(2, secs + " s ≤ 300 s");
+              }
+            }
+            if (S.phase === "clean") setState("clean");
+            else if (S.phase === "fault")
+              setState(v > ALERT ? "alert" : "drifting");
+            else if (S.phase === "restored") {
+              if (v < RECOVERED) {
+                if (!S.recovered) {
+                  S.recovered = true;
+                  log(
+                    ">>> recovered: PSI < 0.10, " +
+                      ((S.truck.t - S.restoreAt) / 60).toFixed(1) +
+                      " min after restore",
+                    "e",
+                  );
+                  check(
+                    3,
+                    "PSI=" +
+                      v.toFixed(3) +
+                      " after " +
+                      ((S.truck.t - S.restoreAt) / 60).toFixed(1) +
+                      " min",
+                  );
+                }
+                setState("recovered");
+              } else setState("recovering");
+            }
+          }
+        }
+      }
+
+      function render() {
+        els.clock.textContent = "t+" + fmt(S.truck.t);
+        els.temp.textContent = S.truck.temp.toFixed(2) + " °C";
+        els.temp.className =
+          "val" + (Math.abs(S.truck.temp - 4) > 1 ? " bad" : "");
+        els.vib.textContent = S.truck.vib.toFixed(2) + " g";
+        els.vib.className = "val" + (S.truck.vib > 0.7 ? " bad" : "");
+        if (S.last) {
+          els.pn.textContent = S.last.pn.toFixed(3);
+          els.cls.textContent = "model says " + S.last.cls;
+          els.pnbar.style.width = (S.last.pn * 100).toFixed(1) + "%";
+        }
+        els.psi.textContent = S.lastPsi === null ? "—" : S.lastPsi.toFixed(3);
+        els.psi.style.color =
+          S.lastPsi === null
+            ? ""
+            : S.lastPsi > ALERT
+              ? "var(--alert)"
+              : S.lastPsi < RECOVERED
+                ? "var(--ok)"
+                : "var(--warn)";
+        drawHist();
+        drawTrace();
+        drawSpark();
+      }
+
+      function drawHist() {
+        var cur = counts(S.window),
+          n = Math.max(1, S.window.length);
+        var html = "";
+        for (var i = 0; i < 4; i++) {
+          var rp = (S.ref[i] / REF_N) * 100,
+            wp = (cur[i] / n) * 100;
+          html +=
+            '<div class="bin"><div class="bars"><span class="r" style="height:' +
+            Math.max(1, rp) +
+            '%" title="reference ' +
+            rp.toFixed(1) +
+            '%"></span><span class="w" style="height:' +
+            Math.max(1, wp) +
+            '%" title="window ' +
+            wp.toFixed(1) +
+            '%"></span></div><div class="binlab">' +
+            LABELS[i] +
+            "<br>" +
+            rp.toFixed(0) +
+            "% · " +
+            (S.window.length ? wp.toFixed(0) : "–") +
+            "%</div></div>";
+        }
+        els.hist.innerHTML = html;
+      }
+
+      function css(name) {
+        return getComputedStyle(document.documentElement)
+          .getPropertyValue(name)
+          .trim();
+      }
+      function prep(canvas) {
+        var dpr = window.devicePixelRatio || 1,
+          w = canvas.clientWidth,
+          h = canvas.clientHeight;
+        if (
+          canvas.width !== Math.round(w * dpr) ||
+          canvas.height !== Math.round(h * dpr)
+        ) {
+          canvas.width = Math.round(w * dpr);
+          canvas.height = Math.round(h * dpr);
+        }
+        var ctx = canvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        return { ctx: ctx, w: w, h: h };
+      }
+
+      function drawSpark() {
+        var c = prep(document.getElementById("spark")),
+          ctx = c.ctx,
+          d = S.temps;
+        if (d.length < 2) return;
+        var lo = Math.min(3, Math.min.apply(null, d)),
+          hi = Math.max(5.5, Math.max.apply(null, d));
+        var y = function (v) {
+          return c.h - 4 - ((v - lo) / (hi - lo)) * (c.h - 8);
+        };
+        ctx.strokeStyle = css("--rule");
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        [5, 7].forEach(function (lim) {
+          if (lim < hi) {
+            ctx.beginPath();
+            ctx.moveTo(0, y(lim));
+            ctx.lineTo(c.w, y(lim));
+            ctx.stroke();
+          }
+        });
+        ctx.setLineDash([]);
+        ctx.strokeStyle = css("--accent");
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        d.forEach(function (v, i) {
+          var x = (i / 179) * c.w;
+          if (i) ctx.lineTo(x, y(v));
+          else ctx.moveTo(x, y(v));
+        });
+        ctx.stroke();
+        ctx.fillStyle = css("--muted");
+        ctx.font = "11px " + css("--mono");
+        ctx.fillText("last 3 min", 4, 12);
+      }
+
+      function drawTrace() {
+        var c = prep(document.getElementById("trace")),
+          ctx = c.ctx,
+          pad = { l: 44, r: 12, t: 12, b: 26 };
+        var W = c.w - pad.l - pad.r,
+          H = c.h - pad.t - pad.b;
+        var tMax = Math.max(20 * 60, S.truck.t),
+          maxPsi = 0.5;
+        S.psiHist.forEach(function (p) {
+          if (p[1] > maxPsi) maxPsi = p[1];
+        });
+        maxPsi = Math.ceil(maxPsi * 1.12 * 4) / 4;
+        var stepY =
+          [0.25, 0.5, 1, 2, 5, 10].filter(function (st) {
+            return maxPsi / st <= 6;
+          })[0] || 10;
+        maxPsi = Math.ceil(maxPsi / stepY) * stepY;
+        var x = function (t) {
+            return pad.l + (t / tMax) * W;
+          },
+          y = function (v) {
+            return pad.t + H - (v / maxPsi) * H;
+          };
+        if (S.injectAt !== null) {
+          ctx.fillStyle = css("--band");
+          var end = S.restoreAt !== null ? S.restoreAt : S.truck.t;
+          ctx.fillRect(x(S.injectAt), pad.t, x(end) - x(S.injectAt), H);
+        }
+        ctx.font = "11px " + css("--mono");
+        ctx.fillStyle = css("--muted");
+        ctx.strokeStyle = css("--rule");
+        ctx.lineWidth = 1;
+        for (var v = 0; v <= maxPsi + 1e-9; v += stepY) {
+          ctx.beginPath();
+          ctx.moveTo(pad.l, y(v));
+          ctx.lineTo(pad.l + W, y(v));
+          ctx.stroke();
+          ctx.fillText(v.toFixed(2), 4, y(v) + 4);
+        }
+        var minStep = tMax > 3600 ? 15 : 5;
+        for (var m = 0; m * 60 <= tMax; m += minStep) {
+          if (x(m * 60) < pad.l + W - 30)
+            ctx.fillText(m + " min", x(m * 60) - 10, c.h - 8);
+        }
+        [
+          [ALERT, "--alert"],
+          [RECOVERED, "--ok"],
+        ].forEach(function (th) {
+          ctx.strokeStyle = css(th[1]);
+          ctx.setLineDash([5, 4]);
+          ctx.beginPath();
+          ctx.moveTo(pad.l, y(th[0]));
+          ctx.lineTo(pad.l + W, y(th[0]));
+          ctx.stroke();
+        });
+        ctx.setLineDash([]);
+        if (S.psiHist.length) {
+          ctx.strokeStyle = css("--accent");
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          S.psiHist.forEach(function (p, i) {
+            if (i) ctx.lineTo(x(p[0]), y(p[1]));
+            else ctx.moveTo(x(p[0]), y(p[1]));
+          });
+          ctx.stroke();
+          ctx.fillStyle = css("--accent");
+          S.psiHist.forEach(function (p) {
+            ctx.beginPath();
+            ctx.arc(x(p[0]), y(p[1]), 2.5, 0, 2 * Math.PI);
+            ctx.fill();
+          });
+          var last = S.psiHist[S.psiHist.length - 1];
+          ctx.fillStyle = css("--ink");
+          ctx.beginPath();
+          ctx.arc(x(last[0]), y(last[1]), 4.5, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      }
+
+      els.inject.addEventListener("click", function () {
+        S.truck.fault = true;
+        S.phase = "fault";
+        S.injectAt = S.truck.t;
+        S.restoreAt = null;
+        S.alerted = false;
+        S.recovered = false;
+        log(
+          ">>> " +
+            stamp() +
+            " inject_combined: simulator restarted with --anomaly combined",
+          "e",
+        );
+        els.inject.disabled = true;
+        els.restore.disabled = false;
+        setState("drifting");
+      });
+      els.restore.addEventListener("click", function () {
+        S.truck.fault = false;
+        S.truck.drift = 0;
+        S.phase = "restored";
+        S.restoreAt = S.truck.t;
+        S.recovered = false;
+        log(
+          ">>> " +
+            stamp() +
+            " restore_clean: simulator restarted with --anomaly none",
+          "e",
+        );
+        els.restore.disabled = true;
+        els.inject.disabled = false;
+        setState("recovering");
+      });
+      els.reset.addEventListener("click", function () {
+        init();
+      });
+      els.pause.addEventListener("click", function () {
+        S.paused = !S.paused;
+        els.pause.textContent = S.paused ? "Resume" : "Pause";
+      });
+
+      var lastFrame = performance.now();
+      function loop(now) {
+        var dt = Math.min(0.25, (now - lastFrame) / 1000);
+        lastFrame = now;
+        if (!S.paused) {
+          S.acc += dt * Number(els.speed.value);
+          var steps = 0;
+          while (S.acc >= 1 && steps < 2000) {
+            step();
+            S.acc -= 1;
+            steps++;
+          }
+          if (steps) render();
+        }
+        requestAnimationFrame(loop);
+      }
+
+      var PB = {
+        deployed: false,
+        newModel: false,
+        runs: 0,
+        lastChanged: null,
+        busy: false,
+      };
+      var pbout = document.getElementById("pbout");
+      var TASKS = [
+        "1/7 Create deployment directory if not present: /opt/logibridge",
+        "2/7 Copy new model file to model.tflite in /opt/logibridge",
+        "3/7 Copy reference_dist.json",
+        "4/7 Stop running inference container (only if model/reference changed)",
+        "5/7 Pull updated container image from local registry",
+        "6/7 Start inference container with environment variables",
+        "7/7 Wait 15 seconds and verify the container is running",
+      ];
+      function pbline(text, cls) {
+        var sp = document.createElement("span");
+        if (cls) sp.className = cls;
+        sp.textContent = text + "\n";
+        pbout.appendChild(sp);
+        pbout.scrollTop = pbout.scrollHeight;
+      }
+      function stars(t) {
+        return t + " " + "*".repeat(Math.max(3, 78 - t.length));
+      }
+      function planRun() {
+        var fresh = !PB.deployed,
+          changedModel = PB.newModel;
+        return [
+          fresh ? "changed" : "ok",
+          fresh || changedModel ? "changed" : "ok",
+          fresh ? "changed" : "ok",
+          fresh ? "ok" : changedModel ? "changed" : "skipping",
+          "ok",
+          fresh || changedModel ? "changed" : "ok",
+          "ok",
+        ];
+      }
+      document.getElementById("runpb").addEventListener("click", function () {
+        if (PB.busy) return;
+        PB.busy = true;
+        this.disabled = true;
+        var btn = this,
+          res = planRun(),
+          i = 0;
+        PB.runs += 1;
+        pbline(
+          "$ ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml   # run " +
+            PB.runs,
+          "h",
+        );
+        pbline("");
+        pbline(
+          stars(
+            "PLAY [Deploy LogiBridge inference container to the truck edge node]",
+          ),
+          "h",
+        );
+        (function next() {
+          if (i < TASKS.length) {
+            pbline("");
+            pbline(stars("TASK [" + TASKS[i] + "]"));
+            var r = res[i],
+              cls = r === "changed" ? "c" : r === "ok" ? "o" : "s";
+            var delay = i === 6 ? 1500 : 350;
+            setTimeout(function () {
+              pbline(r + ": [truck_001]", cls);
+              i += 1;
+              next();
+            }, delay);
+            return;
+          }
+          var ok = res.filter(function (r) {
+            return r !== "skipping";
+          }).length;
+          var ch = res.filter(function (r) {
+            return r === "changed";
+          }).length;
+          var sk = res.filter(function (r) {
+            return r === "skipping";
+          }).length;
+          pbline("");
+          pbline(stars("PLAY RECAP"), "h");
+          pbline(
+            "truck_001                  : ok=" +
+              ok +
+              "    changed=" +
+              ch +
+              "    unreachable=0    failed=0    skipped=" +
+              sk +
+              "    rescued=0    ignored=0",
+            ch === 0 ? "z" : "c",
+          );
+          pbline("");
+          if (ch === 0 && PB.lastChanged !== null)
+            check(4, "run " + PB.runs + ": changed=0");
+          PB.lastChanged = ch;
+          PB.deployed = true;
+          PB.newModel = false;
+          PB.busy = false;
+          btn.disabled = false;
+        })();
+      });
+      document
+        .getElementById("newmodel")
+        .addEventListener("click", function () {
+          PB.newModel = true;
+          pbline(
+            "# new cold_chain_mlp_pruned_int8.tflite released (different bytes): next run should copy it, stop and restart the container",
+            "s",
+          );
+        });
+      document.getElementById("pbreset").addEventListener("click", function () {
+        PB.deployed = false;
+        PB.newModel = false;
+        PB.runs = 0;
+        PB.lastChanged = null;
+        pbout.textContent = "";
+        uncheck(4);
+        pbline(
+          "# fresh truck: nothing in /opt/logibridge, no container running",
+          "s",
+        );
+      });
+      pbline(
+        "# fresh truck: nothing in /opt/logibridge, no container running. Press Run ansible-playbook.",
+        "s",
+      );
+
+      init();
+      for (var i = 0; i < 6 * 60; i++) step();
+      render();
+      window.addEventListener("resize", function () {
+        drawTrace();
+        drawSpark();
+      });
+      requestAnimationFrame(loop);
+    })();
+  </script>
+</html>
