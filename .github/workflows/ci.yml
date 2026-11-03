@@ -20,6 +20,7 @@ env:
   BENCH_DEPS: psutil==7.2.2 matplotlib==3.11.2
   ANSIBLE_DEPS: ansible==14.5.0 ansible-lint==26.10.1 docker==7.2.0
   IMAGE: logi-edge:ci
+  MODEL: cold_chain_mlp_pruned_int8.tflite
 
 defaults:
   run:
@@ -159,7 +160,7 @@ jobs:
           retention-days: 30
 
   deploy:
-    name: "Deploy: MQTT integration, offline sync, Ansible twice (C1/D2/E2)"
+    name: "Deploy: MQTT integration and offline store-and-forward (C1/D2)"
     needs: models
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -195,42 +196,12 @@ jobs:
       - name: "Offline store-and-forward: alerts raised in a coverage gap reach the ops centre"
         run: bash scripts/offline_sync_test.sh truck_001 5
 
-      - name: "E2: Ansible run 1 deploys, run 2 must report changed=0"
-        env:
-          ANSIBLE_FORCE_COLOR: "0"
-          ANSIBLE_LOCALHOST_WARNING: "False"
-        run: |
-          /usr/bin/python3 -m venv "$RUNNER_TEMP/ansible"
-          "$RUNNER_TEMP/ansible/bin/pip" install --quiet $ANSIBLE_DEPS
-          export PATH="$RUNNER_TEMP/ansible/bin:$PATH"
-          ansible-lint deployment/logibridge_deploy.yml
-
-          docker run -d --name registry -p 5000:5000 registry:2
-          for _ in $(seq 1 30); do curl -sf http://localhost:5000/v2/ > /dev/null && break; sleep 1; done
-          docker tag "$IMAGE" localhost:5000/logi-edge:v1
-          docker push localhost:5000/logi-edge:v1
-
-          ref="$RUNNER_TEMP/it-cold_chain_mlp_pruned_int8/reference_dist.json"
-          for run in 1 2; do
-            echo "=== ansible-playbook run $run ==="
-            ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml \
-              -e reference_src="$ref" -e truck_id=truck_ansible | tee "$RUNNER_TEMP/ansible_run$run.log"
-          done
-          python scripts/ci_summary.py ansible "$RUNNER_TEMP/ansible_run1.log" "$RUNNER_TEMP/ansible_run2.log"
-          grep -E '^truck_001 +:' "$RUNNER_TEMP/ansible_run2.log" | grep -Eq 'changed=0 .*failed=0' \
-            || { echo "::error::second run is not idempotent"; exit 1; }
-
-      - name: Deployed container publishes inference
-        run: |
-          docker exec mosquitto mosquitto_sub -h localhost -t "logibridge/trucks/truck_ansible/inference" -C 1 -W 90
-
       - name: Container logs
         if: always()
         run: |
           for f in "$RUNNER_TEMP"/it-*/container.log; do
             echo "::group::$f"; tail -n 40 "$f"; echo "::endgroup::"
           done
-          echo "::group::ansible-deployed container"; docker logs logibridge-inference 2>&1 | tail -n 30 || true; echo "::endgroup::"
 
       - name: Upload deployment evidence
         if: always()
@@ -239,6 +210,124 @@ jobs:
           name: deployment
           path: |
             ${{ runner.temp }}/it-*/
-            ${{ runner.temp }}/ansible_run*.log
             ${{ runner.temp }}/offline-sync/received.jsonl
+          retention-days: 30
+
+  psi-drift:
+    name: "E1: PSI drift monitoring (inject fault, alert, recover)"
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      REF_SIZE: "30"
+      WINDOW: "30"
+      INTERVAL: "20"
+      MIN_SAMPLES: "6"
+      CLEAN_MIN: "6"
+      HOLD_AFTER_ALERT_S: "60"
+      RECOVER_MAX_MIN: "15"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install simulator and monitor dependencies
+        run: pip install paho-mqtt==2.1.0 matplotlib==3.11.2
+
+      - name: Build the inference image
+        run: docker build -f inference/Dockerfile -t "$IMAGE" .
+
+      - name: Start the truck's MQTT broker
+        run: docker run -d --name mosquitto -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+
+      - name: "Reference -> monitor -> inject --anomaly combined -> DRIFT ALERT -> restore -> recovered"
+        run: |
+          echo "Demo settings: reference $REF_SIZE, window $WINDOW, PSI every ${INTERVAL}s (brief: 300 / 100 / 60s)"
+          bash scripts/psi_drift_demo.sh "$IMAGE" "$MODEL" truck_001 "$RUNNER_TEMP/psi"
+
+      - name: Upload PSI evidence (timeline chart, logs, reference)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: e1-psi-drift
+          path: ${{ runner.temp }}/psi/
+          retention-days: 30
+
+  ansible:
+    name: "E2: Ansible deployment playbook (run twice, second run changed=0)"
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ANSIBLE_FORCE_COLOR: "0"
+      ANSIBLE_LOCALHOST_WARNING: "False"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build the inference image and push it to the local registry
+        run: |
+          docker build -f inference/Dockerfile -t "$IMAGE" .
+          docker run -d --name registry -p 5000:5000 registry:2
+          for _ in $(seq 1 30); do curl -sf http://localhost:5000/v2/ > /dev/null && break; sleep 1; done
+          docker tag "$IMAGE" localhost:5000/logi-edge:v1
+          docker push localhost:5000/logi-edge:v1
+
+      - name: Start broker and clean sensor simulator
+        run: |
+          pip install paho-mqtt==2.1.0 pyyaml==6.0.3
+          docker run -d --name mosquitto -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+          nohup python data_pipeline/simulator.py --anomaly none > "$RUNNER_TEMP/simulator.log" 2>&1 &
+
+      - name: Build a clean reference_dist.json for the playbook to deploy
+        run: |
+          docker run -d --name ref-inference --network host \
+            -e MODEL_PATH="$MODEL" -e TRUCK_ID=ref -e MQTT_BROKER=localhost "$IMAGE"
+          python monitoring/drift_monitor.py --mode reference --reference-size 6 \
+            --truck-id ref --reference "$RUNNER_TEMP/reference_dist.json"
+          docker rm -f ref-inference
+
+      - name: Install Ansible and lint the playbook
+        run: |
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/ansible"
+          "$RUNNER_TEMP/ansible/bin/pip" install --quiet $ANSIBLE_DEPS
+          echo "$RUNNER_TEMP/ansible/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ansible/bin/ansible-lint" deployment/logibridge_deploy.yml
+
+      - name: "Ansible run 1: deploy to the truck"
+        run: |
+          ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml \
+            -e reference_src="$RUNNER_TEMP/reference_dist.json" | tee "$RUNNER_TEMP/run1.log"
+
+      - name: "Ansible run 2: same command, nothing changed"
+        run: |
+          ansible-playbook -i deployment/inventory.ini deployment/logibridge_deploy.yml \
+            -e reference_src="$RUNNER_TEMP/reference_dist.json" | tee "$RUNNER_TEMP/run2.log"
+          python scripts/ci_summary.py ansible "$RUNNER_TEMP/run1.log" "$RUNNER_TEMP/run2.log"
+          grep -E '^truck_001 +:' "$RUNNER_TEMP/run2.log" | grep -Eq 'changed=0 .*failed=0' \
+            || { echo "::error::second run is not idempotent"; exit 1; }
+
+      - name: The deployed container is live
+        run: |
+          docker ps --filter name=logibridge-inference
+          docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' logibridge-inference | grep -E 'MODEL_PATH|TRUCK_ID'
+          docker exec mosquitto mosquitto_sub -t "logibridge/trucks/truck_001/inference" -C 2 -W 60
+          docker logs logibridge-inference 2>&1 | tail -n 8
+
+      - name: Upload Ansible evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ansible
+          path: |
+            ${{ runner.temp }}/run1.log
+            ${{ runner.temp }}/run2.log
+            ${{ runner.temp }}/reference_dist.json
           retention-days: 30
