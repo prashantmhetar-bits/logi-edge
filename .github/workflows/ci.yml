@@ -213,6 +213,49 @@ jobs:
             ${{ runner.temp }}/offline-sync/received.jsonl
           retention-days: 30
 
+  reference:
+    name: "E1: build production PSI reference (300 clean samples)"
+    if: github.event_name == 'workflow_dispatch'
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build image, start broker and clean simulator
+        run: |
+          pip install paho-mqtt==2.1.0 pyyaml==6.0.3
+          docker build -f inference/Dockerfile -t "$IMAGE" .
+          docker run -d --name mosquitto -p 1883:1883 eclipse-mosquitto:2 mosquitto -c /mosquitto-no-auth.conf
+          nohup python data_pipeline/simulator.py --anomaly none > "$RUNNER_TEMP/simulator.log" 2>&1 &
+
+      - name: Collect 300-sample reference distribution
+        run: |
+          docker run -d --name ref-inference --network host \
+            -e MODEL_PATH="$MODEL" -e TRUCK_ID=truck_001 -e MQTT_BROKER=localhost "$IMAGE"
+          python monitoring/drift_monitor.py --mode reference --reference-size 300 \
+            --truck-id truck_001 --reference "$RUNNER_TEMP/reference_dist.json"
+          docker rm -f ref-inference
+          python - <<EOF
+          import json
+          d = json.load(open("$RUNNER_TEMP/reference_dist.json"))
+          print("n =", d["n"], "proportions =", d["proportions"])
+          assert d["n"] == 300, f"expected 300 samples, got {d['n']}"
+          EOF
+
+      - name: Upload reference
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: reference-dist
+          path: ${{ runner.temp }}/reference_dist.json
+          if-no-files-found: error
+          retention-days: 30
+
   psi-drift:
     name: "E1: PSI drift monitoring (inject fault, alert, recover)"
     needs: checks
