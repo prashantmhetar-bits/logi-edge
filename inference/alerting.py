@@ -4,7 +4,7 @@ from pathlib import Path
 
 SEVERITY = {"NORMAL": 0, "WARNING": 1, "CRITICAL": 2}
 
-
+# Class
 class AlertTracker:
 
     def __init__(self, truck_id, model_name):
